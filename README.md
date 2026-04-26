@@ -4,6 +4,21 @@ Telegram bot untuk mencatat transaksi keuangan ke Google Sheets secara otomatis.
 
 ---
 
+## Fitur
+
+- Catat transaksi masuk/keluar via Telegram
+- Catat transfer internal antar rekening (2 baris otomatis)
+- Pencocokan kategori otomatis (fuzzy matching + keyword hints)
+- Preview sebelum simpan
+- Tanggal opsional (default hari ini)
+- `/saldo` — rekap saldo per akun dari dashboard
+- `/riwayat` — 10 transaksi terakhir
+- `/hari_ini` — ringkasan transaksi hari ini
+- `/format` — template transaksi siap copas
+- `/transfer` — template transfer internal siap copas
+
+---
+
 ## Setup (Langkah demi Langkah)
 
 ### Step 1 — Buat Telegram Bot
@@ -39,46 +54,67 @@ Telegram bot untuk mencatat transaksi keuangan ke Google Sheets secara otomatis.
 2. Salin nilai `"client_email"`, contoh: `fintrack-service@fintrack-bot.iam.gserviceaccount.com`
 3. Buka Google Sheets Fintrack Anda
 4. Klik tombol **Share** (pojok kanan atas)
-5. Paste email service account tadi → ubah role ke **Editor** → klik **Send**
+5. Paste email service account → ubah role ke **Editor** → klik **Send**
 6. Salin **Spreadsheet ID** dari URL:
    ```
-   https://docs.google.com/spreadsheets/d/1jazkLa6ie_TlSQ2OelqTQByOcld5wfRH-FM9SVkNUCE/edit
+   https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit
    ```
+
 ---
 
 ### Step 4 — Konfigurasi Environment
 
-1. Salin file contoh:
-   ```bash
-   cp .env.example .env
-   ```
-2. Edit file `.env`:
-   ```
-   TELEGRAM_BOT_TOKEN=token_dari_botfather
-   SPREADSHEET_ID=id_dari_url_spreadsheet
-   GOOGLE_CREDENTIALS_PATH=credentials.json
-   ```
+Salin file contoh:
+```bash
+cp .env.example .env
+```
+
+Edit file `.env`:
+```
+TELEGRAM_BOT_TOKEN=token_dari_botfather
+SPREADSHEET_ID=id_dari_url_spreadsheet
+GOOGLE_CREDENTIALS_PATH=credentials.json
+```
+
+> **Untuk server/cloud:** gunakan `GOOGLE_CREDENTIALS_JSON` berisi isi lengkap `credentials.json` sebagai satu baris JSON, tanpa perlu upload file.
 
 ---
 
-### Step 5 — Sesuaikan Nama Sheet (Penting!)
+### Step 5 — Sesuaikan Nama Sheet
 
 Buka `config.py` dan pastikan nama sheet sesuai dengan tab di spreadsheet Anda:
 
 ```python
-TRANSACTION_SHEET_NAME = "Transaction Log"  # sesuaikan dengan nama tab
+TRANSACTION_SHEET_NAME = "Transaction Log"  # nama tab transaction log
 ```
+
+Format nama sheet dashboard: `Dash-JAN`, `Dash-FEB`, ..., `Dash-DEC` — otomatis sesuai bulan berjalan.
 
 ---
 
 ### Step 6 — Install & Jalankan
 
 ```bash
+# Buat virtual environment
+python3 -m venv venv
+source venv/bin/activate  # Mac/Linux
+
 # Install dependencies
 pip install -r requirements.txt
 
 # Jalankan bot
 python bot.py
+```
+
+Untuk menjalankan di background (home server / PC):
+```bash
+nohup python bot.py &> bot.log &
+
+# Cek log
+tail -f bot.log
+
+# Stop bot
+pkill -f bot.py
 ```
 
 ---
@@ -87,7 +123,7 @@ python bot.py
 
 ### Catat Transaksi
 
-Kirim pesan ke bot dengan format:
+Gunakan `/format` untuk template, atau langsung kirim:
 
 ```
 jenis = keluar
@@ -105,41 +141,57 @@ akun = Mandiri
 nominal = 8jt
 ```
 
-**Format nominal yang didukung:** `35rb`, `1.5jt`, `500000`, `1,500,000`
+**Prefix yang tersedia:** `kakak`, `pokok`, `adek`, `lain`, `titipan`
+
+**Format nominal:** `35rb`, `1.5jt`, `500000`, `1,500,000`
+
+**Tanggal opsional:** tambahkan `tanggal = 25/04/2026` jika bukan hari ini
+
+### Catat Transfer Internal
+
+Gunakan `/transfer` untuk template, atau langsung kirim:
+
+```
+jenis = transfer
+dari = BCA
+ke = Jago Main
+nominal = 500rb
+```
+
+Tarik tunai (tujuan ke Cash):
+```
+jenis = transfer
+dari = BCA
+ke = Cash
+nominal = 200rb
+```
+
+Bot otomatis mencatat 2 baris: kredit di akun asal + debit di akun tujuan.
 
 ### Alur Konfirmasi
 
 ```
 Anda  → kirim format transaksi
-Bot   → tampilkan preview atau pilihan kategori
-Anda  → ketik nomor (jika ada pilihan kategori)
-Bot   → tampilkan preview final
+Bot   → preview atau pilihan kategori (jika ambigu)
+Anda  → ketik nomor (jika ada pilihan)
+Bot   → preview final
 Anda  → ok (simpan) atau batal (batalkan)
-Bot   → ✅ tersimpan + saldo total terkini
+Bot   → ✅ tersimpan + saldo terkini
 ```
-
-### Perintah Lain
-
-| Perintah | Fungsi |
-|---|---|
-| `/saldo` | Rekap saldo per akun |
-| `/batal` | Batalkan transaksi yang sedang diproses |
-| `/start` | Tampilkan panduan singkat |
 
 ---
 
-## Deploy ke Railway (Gratis)
+## Daftar Command
 
-1. Push kode ini ke GitHub (jangan include `credentials.json` dan `.env`)
-2. Buka [https://railway.app](https://railway.app) → login dengan GitHub
-3. **New Project** → **Deploy from GitHub repo** → pilih repo ini
-4. Tambahkan environment variables di Railway:
-   - `TELEGRAM_BOT_TOKEN`
-   - `SPREADSHEET_ID`
-   - `GOOGLE_CREDENTIALS_PATH` → isi `credentials.json`
-5. Upload `credentials.json` sebagai file di Railway (via **Files** tab atau set isinya sebagai env var `GOOGLE_CREDENTIALS_JSON`)
-
-> **Tip:** Daripada upload file, lebih aman menyimpan isi credentials.json sebagai environment variable `GOOGLE_CREDENTIALS_JSON`, lalu modifikasi `sheets.py` untuk membacanya dari env var.
+| Command | Fungsi |
+|---|---|
+| `/help` | Daftar semua command |
+| `/format` | Template transaksi siap copas |
+| `/transfer` | Template transfer internal siap copas |
+| `/saldo` | Rekap saldo per akun dari dashboard |
+| `/riwayat` | 10 transaksi terakhir |
+| `/hari_ini` | Ringkasan transaksi hari ini |
+| `/batal` | Batalkan input yang sedang berjalan |
 
 ---
 
@@ -148,10 +200,44 @@ Bot   → ✅ tersimpan + saldo total terkini
 ```
 fintrack-bot/
 ├── bot.py              ← main bot & telegram handler
-├── matcher.py          ← logika pencocokan kategori
+├── matcher.py          ← logika pencocokan kategori (fuzzy + keyword hints)
 ├── sheets.py           ← integrasi Google Sheets
-├── config.py           ← daftar kategori, akun, konstanta
+├── config.py           ← kategori, akun, konstanta, prefix map
 ├── requirements.txt
+├── Procfile            ← untuk deploy (Railway, Fly.io, dll)
 ├── .env.example
+├── .gitignore
 └── credentials.json    ← JANGAN di-commit ke git!
+```
+
+---
+
+## Deploy ke Home Server
+
+```bash
+# Clone repo
+git clone https://github.com/username/fintrack-bot.git
+cd fintrack-bot
+
+# Setup environment
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Copy credentials (sekali saja)
+cp /path/to/credentials.json .
+
+# Buat .env
+cp .env.example .env
+# Edit .env dengan token dan spreadsheet ID
+
+# Jalankan
+nohup python bot.py &> bot.log &
+```
+
+Untuk auto-start saat server reboot, tambahkan ke crontab:
+```bash
+crontab -e
+# Tambahkan baris:
+@reboot cd /path/to/fintrack-bot && source venv/bin/activate && nohup python bot.py &> bot.log &
 ```
