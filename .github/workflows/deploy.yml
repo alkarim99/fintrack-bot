@@ -2,26 +2,12 @@ name: Deploy fintrack-bot
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
+    runs-on: self-hosted
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Deploy to dulcloud
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            cd ~/services/fintrack-bot/app
-            git pull origin main
-            cd ~/services/fintrack-bot
-            docker compose up -d --build
-            docker logs --tail 20 fintrack-bot
+      - name: Run deploy script
+        run: /bin/bash /home/dul/scripts/deploy-fintrack-bot.sh
