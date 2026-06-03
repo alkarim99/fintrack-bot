@@ -263,7 +263,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Mengambil data saldo...")
     try:
-        saldo = get_saldo_dari_dashboard()
+        saldo, total_tanpa_blu, total_dengan_blu = get_saldo_dari_dashboard()
 
         # Filter by account jika ada argumen (contoh: /saldo BCA, Mandiri)
         if context.args:
@@ -288,8 +288,10 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
             saldo = {k: v for k, v in saldo.items() if k in akun_list}
-
-        rekap = format_saldo_rekap(saldo)
+            # Filter mode: hitung manual, tidak pakai total dashboard
+            rekap = format_saldo_rekap(saldo)
+        else:
+            rekap = format_saldo_rekap(saldo, total_tanpa_blu, total_dengan_blu)
         await update.message.reply_text(rekap, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error get saldo: {e}")

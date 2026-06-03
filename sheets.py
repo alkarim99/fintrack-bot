@@ -202,7 +202,8 @@ def get_transaksi_hari_ini(tanggal: str) -> list[dict]:
     ]
 
 
-def get_saldo_dari_dashboard() -> dict[str, float]:
+def get_saldo_dari_dashboard() -> tuple[dict[str, float], float, float]:
+    """Kembalikan (saldo_per_akun, total_tanpa_blu, total_dengan_blu)."""
     sheet_name = get_dashboard_sheet_name()
     sheet = _get_sheet(sheet_name)
     rows = sheet.get_values("H4:L25")
@@ -215,18 +216,32 @@ def get_saldo_dari_dashboard() -> dict[str, float]:
             continue
         saldo_ini = _parse_rupiah(row[4]) if len(row) > 4 else 0.0
         saldo[nama_akun] = saldo_ini
-    return saldo
+
+    # Baca total langsung dari cell (L15 dan L21)
+    total_tanpa_blu = _parse_rupiah(sheet.cell(15, 12).value)
+    total_dengan_blu = _parse_rupiah(sheet.cell(21, 12).value)
+    return saldo, total_tanpa_blu, total_dengan_blu
 
 
-def format_saldo_rekap(saldo_per_akun: dict[str, float]) -> str:
+def format_saldo_rekap(
+    saldo_per_akun: dict[str, float],
+    total_tanpa_blu: float | None = None,
+    total_dengan_blu: float | None = None,
+) -> str:
     if not saldo_per_akun:
         return "Tidak ada data saldo."
     lines = ["💰 *Rekap Saldo per Akun*\n"]
-    total = 0.0
     for akun, saldo in sorted(saldo_per_akun.items()):
         if saldo == 0:
             continue
         lines.append(f"  🏦 {akun}: Rp{saldo:,.2f}")
-        total += saldo
-    lines.append(f"\n*Total Aset: Rp{total:,.2f}*")
+
+    if total_tanpa_blu is not None and total_dengan_blu is not None:
+        lines.append(f"\n*Total Aset (tanpa Blu Saving): Rp{total_tanpa_blu:,.2f}*")
+        lines.append(f"*Total Aset (➕ Blu Saving): Rp{total_dengan_blu:,.2f}*")
+    else:
+        # Fallback: hitung manual (untuk mode filter akun)
+        total = sum(saldo_per_akun.values())
+        lines.append(f"\n*Total Aset: Rp{total:,.2f}*")
+
     return "\n".join(lines)
