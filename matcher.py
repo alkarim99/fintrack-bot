@@ -38,6 +38,9 @@ KEYWORD_HINTS = {
     "chatgpt": "subscription ai",
     "gemini": "subscription ai",
     "spotify": "subscription ai",
+    "tua": "kirim ke orang tua",
+    "ortu": "kirim ke orang tua",
+    "orangtua": "kirim ke orang tua",
 }
 
 

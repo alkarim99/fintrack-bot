@@ -118,11 +118,12 @@ def append_transfer(
     akun_asal: str,
     akun_tujuan: str,
     nominal: float,
+    kode_unik: float = 0.0,
 ) -> float:
     """
     Catat transfer internal sebagai 2 baris:
-    1. Kredit di akun asal
-    2. Debit di akun tujuan
+    1. Kredit di akun asal (nominal + kode_unik jika ada)
+    2. Debit di akun tujuan (nominal bersih)
     Deskripsi otomatis, kecuali tarik tunai (tujuan = Cash).
     Returns: saldo total setelah kedua baris.
     """
@@ -133,21 +134,26 @@ def append_transfer(
     if akun_tujuan.lower() == "cash":
         deskripsi_asal = "Tarik tunai"
         deskripsi_tujuan = "Tarik tunai"
+    elif kode_unik > 0:
+        deskripsi_asal = f"Kirim ke {akun_tujuan} (Flip)"
+        deskripsi_tujuan = f"Terima dari {akun_asal} (Flip)"
     else:
         deskripsi_asal = f"Kirim ke {akun_tujuan}"
         deskripsi_tujuan = f"Terima dari {akun_asal}"
 
-    # Baris 1: kredit dari akun asal
-    _write_row(sheet, tanggal, deskripsi_asal, kategori, akun_asal, 0, nominal)
+    total_keluar = nominal + kode_unik
 
-    # Baris 2: debit ke akun tujuan
+    # Baris 1: kredit dari akun asal (termasuk kode unik)
+    _write_row(sheet, tanggal, deskripsi_asal, kategori, akun_asal, 0, total_keluar)
+
+    # Baris 2: debit ke akun tujuan (nominal bersih)
     _, new_saldo = _write_row(sheet, tanggal, deskripsi_tujuan, kategori, akun_tujuan, nominal, 0)
 
     return new_saldo
 
 
-def get_riwayat(n: int = 10) -> list[dict]:
-    """Ambil n transaksi terakhir dari Transaction Log."""
+def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
+    """Ambil n transaksi terakhir dari Transaction Log. Optional filter by akun."""
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
     col_a = sheet.col_values(1)
 
@@ -169,11 +175,14 @@ def get_riwayat(n: int = 10) -> list[dict]:
     for row in rows:
         if not row or not row[0].strip():
             continue
+        akun = row[3] if len(row) > 3 else ""
+        if akun_list and akun not in akun_list:
+            continue
         result.append({
             "tanggal": row[0] if len(row) > 0 else "",
             "deskripsi": row[1] if len(row) > 1 else "",
             "kategori": row[2] if len(row) > 2 else "",
-            "akun": row[3] if len(row) > 3 else "",
+            "akun": akun,
             "debit": _parse_rupiah(row[4]) if len(row) > 4 else 0.0,
             "kredit": _parse_rupiah(row[5]) if len(row) > 5 else 0.0,
             "saldo": _parse_rupiah(row[6]) if len(row) > 6 else 0.0,
@@ -196,7 +205,7 @@ def get_transaksi_hari_ini(tanggal: str) -> list[dict]:
 def get_saldo_dari_dashboard() -> dict[str, float]:
     sheet_name = get_dashboard_sheet_name()
     sheet = _get_sheet(sheet_name)
-    rows = sheet.get_values("H4:L14")
+    rows = sheet.get_values("H4:L25")
     saldo = {}
     for row in rows:
         if not row or not row[0].strip():
@@ -217,7 +226,7 @@ def format_saldo_rekap(saldo_per_akun: dict[str, float]) -> str:
     for akun, saldo in sorted(saldo_per_akun.items()):
         if saldo == 0:
             continue
-        lines.append(f"  🏦 {akun}: Rp{saldo:,.0f}")
+        lines.append(f"  🏦 {akun}: Rp{saldo:,.2f}")
         total += saldo
-    lines.append(f"\n*Total Aset: Rp{total:,.0f}*")
+    lines.append(f"\n*Total Aset: Rp{total:,.2f}*")
     return "\n".join(lines)

@@ -41,14 +41,59 @@ user_state: dict[int, dict] = {}
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def parse_nominal(raw: str) -> float | None:
-    raw = raw.strip().lower().replace(",", "").replace(".", "")
+    """
+    Parse nominal dengan dukungan desimal dan thousand separator.
+
+    Contoh:
+      4,5jt   → 4.5 × 1,000,000 = 4,500,000
+      4.5jt   → 4.5 × 1,000,000 = 4,500,000
+      100,500.90 → 100500.90
+      1.500.000  → 1500000 (titik = thousand separator)
+      15rb    → 15 × 1,000 = 15,000
+      500000  → 500,000
+    """
+    raw = raw.strip().lower()
+
+    # 1. Extract suffix multiplier
     multiplier = 1
-    if raw.endswith("rb") or raw.endswith("k"):
-        multiplier = 1_000
-        raw = re.sub(r"(rb|k)$", "", raw)
-    elif raw.endswith("jt") or raw.endswith("m"):
-        multiplier = 1_000_000
-        raw = re.sub(r"(jt|m)$", "", raw)
+    for suffix, mult in [("rb", 1_000), ("k", 1_000), ("jt", 1_000_000), ("m", 1_000_000)]:
+        if raw.endswith(suffix):
+            multiplier = mult
+            raw = raw[:-len(suffix)].strip()
+            break
+
+    # 2. Detect decimal vs thousand separators
+    has_comma = "," in raw
+    has_period = "." in raw
+
+    if has_comma and has_period:
+        # Both present: last one is decimal separator
+        last_comma = raw.rfind(",")
+        last_period = raw.rfind(".")
+        if last_comma > last_period:
+            # Comma is decimal (e.g. "1.500,90")
+            raw = raw.replace(".", "")   # remove thousand sep
+            raw = raw.replace(",", ".")  # decimal comma → period
+        else:
+            # Period is decimal (e.g. "1,500.90")
+            raw = raw.replace(",", "")   # remove thousand sep
+    elif has_comma:
+        # Only comma: check if decimal (1-2 digits after last comma)
+        last_comma = raw.rfind(",")
+        after = raw[last_comma + 1:]
+        if len(after) <= 2 and after.isdigit():
+            raw = raw.replace(",", ".")  # decimal comma → period
+        else:
+            raw = raw.replace(",", "")   # thousand separator
+    elif has_period:
+        # Only period: check if decimal (1-2 digits after last period)
+        last_period = raw.rfind(".")
+        after = raw[last_period + 1:]
+        if len(after) <= 2 and after.isdigit():
+            pass  # already decimal, keep as-is
+        else:
+            raw = raw.replace(".", "")   # thousand separator
+
     try:
         return float(raw) * multiplier
     except ValueError:
@@ -107,7 +152,7 @@ def parse_transaction_message(text: str) -> dict | str:
 
 def parse_transfer_message(text: str) -> dict | str:
     required_keys = {"jenis", "dari", "ke", "nominal"}
-    optional_keys = {"tanggal"}
+    optional_keys = {"tanggal", "kode_unik"}
     result = {}
 
     for line in text.strip().splitlines():
@@ -131,6 +176,15 @@ def parse_transfer_message(text: str) -> dict | str:
         return f"Nominal '{result['nominal']}' tidak bisa dibaca."
     result["nominal_float"] = nominal
 
+    # Parse kode_unik (opsional, default 0)
+    kode_unik = 0.0
+    if "kode_unik" in result and result["kode_unik"]:
+        ku = parse_nominal(result["kode_unik"])
+        if ku is None or ku < 0:
+            return f"Kode unik '{result['kode_unik']}' tidak bisa dibaca."
+        kode_unik = ku
+    result["kode_unik_float"] = kode_unik
+
     if "tanggal" in result and result["tanggal"]:
         parsed_tgl = parse_tanggal(result["tanggal"])
         if parsed_tgl is None:
@@ -150,7 +204,7 @@ def build_preview(data: dict) -> str:
         f"📝 Deskripsi : {data['deskripsi']}\n"
         f"🏷️ Kategori  : {data['kategori']}\n"
         f"🏦 Akun      : {data['akun']}\n"
-        f"{jenis_label} : Rp{data['nominal_float']:,.0f}\n\n"
+        f"{jenis_label} : Rp{data['nominal_float']:,.2f}\n\n"
         f"Balas *ok* untuk simpan, atau *batal* untuk membatalkan."
     )
 
@@ -160,14 +214,22 @@ def build_transfer_preview(data: dict) -> str:
         deskripsi = f"Tarik tunai dari {data['dari']}"
     else:
         deskripsi = f"{data['dari']} → {data['ke']}"
-    return (
-        f"📋 *Preview Transfer Internal*\n\n"
-        f"📅 Tanggal : {data['tanggal']}\n"
-        f"↔️ Transfer : {deskripsi}\n"
-        f"💸 Nominal  : Rp{data['nominal_float']:,.0f}\n\n"
-        f"Akan dicatat sebagai *2 baris* di Transaction Log.\n\n"
-        f"Balas *ok* untuk simpan, atau *batal* untuk membatalkan."
-    )
+
+    kode_unik = data.get("kode_unik_float", 0.0)
+    total_keluar = data["nominal_float"] + kode_unik
+
+    lines = [
+        f"📋 *Preview Transfer Internal*\n",
+        f"📅 Tanggal : {data['tanggal']}\n",
+        f"↔️ Transfer : {deskripsi}\n",
+        f"💸 Nominal  : Rp{data['nominal_float']:,.2f}\n",
+    ]
+    if kode_unik > 0:
+        lines.append(f"🔢 Kode Unik: Rp{kode_unik:,.2f}\n")
+        lines.append(f"📤 Total Keluar: Rp{total_keluar:,.2f}\n")
+    lines.append(f"\nAkan dicatat sebagai *2 baris* di Transaction Log.\n")
+    lines.append(f"\nBalas *ok* untuk simpan, atau *batal* untuk membatalkan.")
+    return "".join(lines)
 
 
 # ─── Command Handlers ─────────────────────────────────────────────────────────
@@ -185,10 +247,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 *Daftar Perintah Fintrack Bot*\n\n"
         "💳 *Transaksi*\n"
         "  /format — Template input transaksi\n"
-        "  /transfer — Template input transfer internal\n\n"
+        "  /transfer — Template input transfer internal (mendukung kode unik Flip)\n\n"
         "📊 *Laporan*\n"
-        "  /saldo — Rekap saldo per akun\n"
-        "  /riwayat — 10 transaksi terakhir\n"
+        "  /saldo — Rekap saldo per akun. Filter: /saldo BCA, Mandiri\n"
+        "  /riwayat — 10 transaksi terakhir. Filter: /riwayat BCA\n"
         "  /hari\\_ini — Ringkasan transaksi hari ini\n\n"
         "⚙️ *Lainnya*\n"
         "  /batal — Batalkan input yang sedang berjalan\n"
@@ -202,6 +264,31 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Mengambil data saldo...")
     try:
         saldo = get_saldo_dari_dashboard()
+
+        # Filter by account jika ada argumen (contoh: /saldo BCA, Mandiri)
+        if context.args:
+            akun_inputs = " ".join(context.args).split(",")
+            akun_list = []
+            not_found = []
+            for a in akun_inputs:
+                a = a.strip()
+                if not a:
+                    continue
+                matched = match_account(a)
+                if matched:
+                    akun_list.append(matched)
+                else:
+                    not_found.append(a)
+
+            if not_found:
+                await update.message.reply_text(
+                    f"⚠️ Akun tidak dikenali: {', '.join(not_found)}"
+                )
+                if not akun_list:
+                    return
+
+            saldo = {k: v for k, v in saldo.items() if k in akun_list}
+
         rekap = format_saldo_rekap(saldo)
         await update.message.reply_text(rekap, parse_mode="Markdown")
     except Exception as e:
@@ -245,13 +332,22 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "dari = \n"
         "ke = \n"
         "nominal = \n"
+        "kode_unik = \n"
         "```\n\n"
-        "💡 *Contoh:*\n"
+        "💡 *Contoh transfer biasa:*\n"
         "```\n"
         "jenis = transfer\n"
         "dari = BCA\n"
         "ke = Jago Main\n"
         "nominal = 500rb\n"
+        "```\n\n"
+        "💡 *Contoh transfer Flip (dengan kode unik):*\n"
+        "```\n"
+        "jenis = transfer\n"
+        "dari = Mandiri\n"
+        "ke = BCA\n"
+        "nominal = 500000\n"
+        "kode_unik = 325\n"
         "```\n\n"
         "💡 *Contoh tarik tunai:*\n"
         "```\n"
@@ -260,6 +356,7 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ke = Cash\n"
         "nominal = 200rb\n"
         "```\n\n"
+        "📌 *kode\\_unik:* opsional, untuk transfer Flip (selisih biaya admin)\n"
         "📌 *Tanggal (opsional):* tambahkan `tanggal = 25/04/2026` jika bukan hari ini",
         parse_mode="Markdown",
     )
@@ -268,12 +365,37 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Mengambil riwayat transaksi...")
     try:
-        rows = get_riwayat(n=10)
+        # Filter by account jika ada argumen (contoh: /riwayat BCA)
+        akun_list = None
+        if context.args:
+            akun_inputs = " ".join(context.args).split(",")
+            akun_list = []
+            not_found = []
+            for a in akun_inputs:
+                a = a.strip()
+                if not a:
+                    continue
+                matched = match_account(a)
+                if matched:
+                    akun_list.append(matched)
+                else:
+                    not_found.append(a)
+
+            if not_found:
+                await update.message.reply_text(
+                    f"⚠️ Akun tidak dikenali: {', '.join(not_found)}"
+                )
+                if not akun_list:
+                    return
+
+        rows = get_riwayat(n=10, akun_list=akun_list)
         if not rows:
-            await update.message.reply_text("Belum ada transaksi.")
+            filter_info = f" untuk akun {', '.join(akun_list)}" if akun_list else ""
+            await update.message.reply_text(f"Belum ada transaksi{filter_info}.")
             return
 
-        lines = ["📜 *10 Transaksi Terakhir*\n"]
+        header = f"📜 *10 Transaksi Terakhir{' (' + ', '.join(akun_list) + ')' if akun_list else ''}*\n"
+        lines = [header]
         for r in rows:
             arah = "⬆️" if r["debit"] > 0 else "⬇️"
             nominal = r["debit"] if r["debit"] > 0 else r["kredit"]
@@ -281,7 +403,7 @@ async def cmd_riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{arah} *{r['tanggal']}*\n"
                 f"   {r['deskripsi']}\n"
                 f"   {r['kategori']} | {r['akun']}\n"
-                f"   Rp{nominal:,.0f}\n"
+                f"   Rp{nominal:,.2f}\n"
             )
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
@@ -310,14 +432,14 @@ async def cmd_hari_ini(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(
                 f"{arah} {r.get('Deskripsi', '')}\n"
                 f"   {r.get('Kategori', '')} | {r.get('Akun/Rekening', '')}\n"
-                f"   Rp{nominal:,.0f}\n"
+                f"   Rp{nominal:,.2f}\n"
             )
 
         lines.append(
             f"─────────────────\n"
-            f"⬆️ Total Masuk  : Rp{total_masuk:,.0f}\n"
-            f"⬇️ Total Keluar : Rp{total_keluar:,.0f}\n"
-            f"📊 Net          : Rp{total_masuk - total_keluar:,.0f}"
+            f"⬆️ Total Masuk  : Rp{total_masuk:,.2f}\n"
+            f"⬇️ Total Keluar : Rp{total_keluar:,.2f}\n"
+            f"📊 Net          : Rp{total_masuk - total_keluar:,.2f}"
         )
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
@@ -386,7 +508,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_state.pop(chat_id, None)
                 await update.message.reply_text(
                     f"✅ *Tersimpan!*\n\n"
-                    f"💰 Saldo total terkini: *Rp{new_saldo:,.0f}*\n\n"
+                    f"💰 Saldo total terkini: *Rp{new_saldo:,.2f}*\n\n"
                     f"Ketik /saldo untuk rekap lengkap per akun.",
                     parse_mode="Markdown",
                 )
@@ -415,11 +537,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     akun_asal=data["dari"],
                     akun_tujuan=data["ke"],
                     nominal=data["nominal_float"],
+                    kode_unik=data.get("kode_unik_float", 0.0),
                 )
                 user_state.pop(chat_id, None)
                 await update.message.reply_text(
                     f"✅ *Transfer tersimpan!*\n\n"
-                    f"💰 Saldo total terkini: *Rp{new_saldo:,.0f}*\n\n"
+                    f"💰 Saldo total terkini: *Rp{new_saldo:,.2f}*\n\n"
                     f"Ketik /saldo untuk rekap lengkap per akun.",
                     parse_mode="Markdown",
                 )
