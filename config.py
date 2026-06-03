@@ -1,4 +1,8 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+# ─── Timezone ───────────────────────────────────────────────────────────────────
+WIB = ZoneInfo("Asia/Jakarta")
 
 # ─── Kategori yang valid ───────────────────────────────────────────────────────
 VALID_CATEGORIES = [
@@ -82,9 +86,9 @@ MONTH_ABBR = {
 }
 
 def today_str() -> str:
-    return datetime.today().strftime(DATE_FORMAT)
+    return datetime.now(WIB).strftime(DATE_FORMAT)
 
 def get_dashboard_sheet_name() -> str:
     """Kembalikan nama sheet dashboard bulan ini, misal: Dash-APR"""
-    month = datetime.today().month
+    month = datetime.now(WIB).month
     return f"Dash-{MONTH_ABBR[month]}"
