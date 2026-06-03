@@ -211,7 +211,7 @@ def get_saldo_dari_dashboard() -> dict[str, float]:
         if not row or not row[0].strip():
             continue
         nama_akun = row[0].strip()
-        if nama_akun.upper() == "TOTAL":
+        if "TOTAL" in nama_akun.upper():
             continue
         saldo_ini = _parse_rupiah(row[4]) if len(row) > 4 else 0.0
         saldo[nama_akun] = saldo_ini
