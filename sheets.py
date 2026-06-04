@@ -152,8 +152,27 @@ def append_transfer(
     return new_saldo
 
 
+def _parse_row(row: list[str]) -> dict | None:
+    """Parse satu baris transaksi menjadi dict. Return None jika baris kosong."""
+    if not row or not row[0].strip():
+        return None
+    return {
+        "tanggal": row[0] if len(row) > 0 else "",
+        "deskripsi": row[1] if len(row) > 1 else "",
+        "kategori": row[2] if len(row) > 2 else "",
+        "akun": row[3] if len(row) > 3 else "",
+        "debit": _parse_rupiah(row[4]) if len(row) > 4 else 0.0,
+        "kredit": _parse_rupiah(row[5]) if len(row) > 5 else 0.0,
+        "saldo": _parse_rupiah(row[6]) if len(row) > 6 else 0.0,
+    }
+
+
 def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
-    """Ambil n transaksi terakhir dari Transaction Log. Optional filter by akun."""
+    """Ambil n transaksi terakhir dari Transaction Log. Optional filter by akun.
+
+    Jika akun_list diberikan, scan sheet dari bawah ke atas sampai
+    mendapatkan n transaksi yang match dengan akun filter.
+    """
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
     col_a = sheet.col_values(1)
 
@@ -168,27 +187,39 @@ def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
     if last_row < 2:
         return []
 
-    start_row = max(2, last_row - n + 1)
-    rows = sheet.get_values(f"A{start_row}:G{last_row}")
+    if akun_list:
+        # Filter by akun: scan dari bawah ke atas (batch scan) sampai dapat n transaksi
+        result = []
+        batch_size = 50
+        current_end = last_row
 
-    result = []
-    for row in rows:
-        if not row or not row[0].strip():
-            continue
-        akun = row[3] if len(row) > 3 else ""
-        if akun_list and akun not in akun_list:
-            continue
-        result.append({
-            "tanggal": row[0] if len(row) > 0 else "",
-            "deskripsi": row[1] if len(row) > 1 else "",
-            "kategori": row[2] if len(row) > 2 else "",
-            "akun": akun,
-            "debit": _parse_rupiah(row[4]) if len(row) > 4 else 0.0,
-            "kredit": _parse_rupiah(row[5]) if len(row) > 5 else 0.0,
-            "saldo": _parse_rupiah(row[6]) if len(row) > 6 else 0.0,
-        })
+        while len(result) < n and current_end >= 2:
+            current_start = max(2, current_end - batch_size + 1)
+            rows = sheet.get_values(f"A{current_start}:G{current_end}")
 
-    return result
+            # Proses dari bawah (paling baru) ke atas dalam batch ini
+            for row in reversed(rows):
+                parsed = _parse_row(row)
+                if parsed and parsed["akun"] in akun_list:
+                    result.append(parsed)
+                    if len(result) >= n:
+                        break
+
+            current_end = current_start - 1
+
+        return result
+    else:
+        # Tanpa filter: ambil n baris terakhir (existing behavior)
+        start_row = max(2, last_row - n + 1)
+        rows = sheet.get_values(f"A{start_row}:G{last_row}")
+
+        result = []
+        for row in rows:
+            parsed = _parse_row(row)
+            if parsed:
+                result.append(parsed)
+
+        return result
 
 
 def get_transaksi_hari_ini(tanggal: str) -> list[dict]:
