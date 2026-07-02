@@ -2,7 +2,12 @@ import os
 import re
 import gspread
 from google.oauth2.service_account import Credentials
-from config import TRANSACTION_SHEET_NAME, today_str, get_dashboard_sheet_name
+from config import (
+    TRANSACTION_SHEET_NAME,
+    MASTER_SHEET_NAME,
+    today_str,
+    get_dashboard_sheet_name,
+)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -48,6 +53,53 @@ def _parse_rupiah(value: str) -> float:
         return float(clean)
     except ValueError:
         return 0.0
+
+
+_TIPE_ALIASES = {
+    "pemasukan": "pemasukan", "income": "pemasukan", "masuk": "pemasukan",
+    "pengeluaran": "pengeluaran", "expense": "pengeluaran", "keluar": "pengeluaran",
+    "tabungan": "tabungan", "saving": "tabungan",
+    "passthrough": "passthrough", "pass-through": "passthrough", "neraca": "passthrough",
+    "transfer": "passthrough",
+}
+
+
+def get_master_categories() -> dict[str, str] | None:
+    """Baca daftar kategori + tipe dari sheet Data Master.
+
+    Cari kolom berjudul 'Kategori' dan 'Tipe' (case-insensitive) di baris header.
+    Kembalikan {kategori: tipe} dengan tipe dinormalisasi, atau None bila gagal.
+    """
+    try:
+        sheet = _get_sheet(MASTER_SHEET_NAME)
+        rows = sheet.get_values()
+        if not rows:
+            return None
+        header = [h.strip().lower() for h in rows[0]]
+        try:
+            i_kat = header.index("kategori")
+        except ValueError:
+            return None
+        i_tipe = header.index("tipe") if "tipe" in header else None
+
+        result: dict[str, str] = {}
+        for row in rows[1:]:
+            if len(row) <= i_kat:
+                continue
+            kat = row[i_kat].strip()
+            if not kat:
+                continue
+            tipe_raw = row[i_tipe].strip().lower() if (i_tipe is not None and len(row) > i_tipe) else ""
+            if tipe_raw in _TIPE_ALIASES:
+                result[kat] = _TIPE_ALIASES[tipe_raw]
+            else:
+                # Tipe kosong/asing → tebak dari prefix (pos neraca vs pengeluaran)
+                result[kat] = "passthrough" if kat.startswith(
+                    ("[Transfer]", "[Kas RT]", "[Titipan]", "[Hutang]", "[Piutang]")
+                ) else "pengeluaran"
+        return result or None
+    except Exception:
+        return None
 
 
 def get_last_saldo() -> float:

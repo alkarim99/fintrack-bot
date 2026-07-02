@@ -17,8 +17,9 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from config import today_str
-from matcher import match_category, best_match, match_account, format_category_choices
+import config
+from config import today_str, resolve_forced_category, category_type
+from matcher import match_category, best_match, match_account, format_category_choices, resolve_prefix
 from sheets import (
     append_transaction,
     append_transfer,
@@ -26,6 +27,7 @@ from sheets import (
     get_riwayat,
     get_transaksi_hari_ini,
     format_saldo_rekap,
+    get_master_categories,
 )
 
 logging.basicConfig(
@@ -318,9 +320,19 @@ async def cmd_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "nominal = 15rb\n"
         "```\n\n"
         "📌 *Jenis:* masuk / keluar\n"
-        "📌 *Prefix:* kakak / pokok / adek\n"
+        "📌 *Prefix:* kakak / pokok / adek / income / bisnis\n"
+        "     _pos neraca:_ kas rt / titipan / hutang / piutang\n"
+        "     (subkategori pos neraca otomatis dari jenis: masuk/keluar)\n"
         "📌 *Nominal:* 15rb, 1.5jt, 500000\n"
-        "📌 *Tanggal (opsional):* tambahkan `tanggal = 25/04/2026` jika bukan hari ini",
+        "📌 *Tanggal (opsional):* tambahkan `tanggal = 25/04/2026` jika bukan hari ini\n\n"
+        "💡 *Contoh terima pinjaman:*\n"
+        "```\n"
+        "jenis = masuk\n"
+        "prefix = hutang\n"
+        "deskripsi = pinjaman dari bude hajar\n"
+        "akun = Mandiri\n"
+        "nominal = 5jt\n"
+        "```",
         parse_mode="Markdown",
     )
 
@@ -422,27 +434,43 @@ async def cmd_hari_ini(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Belum ada transaksi hari ini ({tanggal}).")
             return
 
-        total_masuk = sum(float(str(r.get("Debit", 0) or 0).replace(",", "")) for r in rows)
-        total_keluar = sum(float(str(r.get("Kredit", 0) or 0).replace(",", "")) for r in rows)
+        def _num(v):
+            return float(str(v or 0).replace("Rp", "").replace(",", "").strip() or 0)
+
+        total_masuk = 0.0
+        total_keluar = 0.0
+        n_neraca = 0
 
         lines = [f"📅 *Transaksi {tanggal}*\n"]
         for r in rows:
-            debit = float(str(r.get("Debit", 0) or 0).replace(",", ""))
-            kredit = float(str(r.get("Kredit", 0) or 0).replace(",", ""))
+            debit = _num(r.get("Debit"))
+            kredit = _num(r.get("Kredit"))
+            kategori = str(r.get("Kategori", ""))
+            tipe = category_type(kategori)
             arah = "⬆️" if debit > 0 else "⬇️"
             nominal = debit if debit > 0 else kredit
+            tag = " ⏸️" if tipe in ("passthrough", "tabungan") else ""
             lines.append(
-                f"{arah} {r.get('Deskripsi', '')}\n"
-                f"   {r.get('Kategori', '')} | {r.get('Akun/Rekening', '')}\n"
+                f"{arah} {r.get('Deskripsi', '')}{tag}\n"
+                f"   {kategori} | {r.get('Akun/Rekening', '')}\n"
                 f"   Rp{nominal:,.2f}\n"
             )
+            if tipe == "pemasukan":
+                total_masuk += debit
+            elif tipe == "pengeluaran":
+                total_keluar += kredit
+            else:
+                n_neraca += 1
 
-        lines.append(
+        footer = (
             f"─────────────────\n"
-            f"⬆️ Total Masuk  : Rp{total_masuk:,.2f}\n"
-            f"⬇️ Total Keluar : Rp{total_keluar:,.2f}\n"
-            f"📊 Net          : Rp{total_masuk - total_keluar:,.2f}"
+            f"⬆️ Pemasukan   : Rp{total_masuk:,.2f}\n"
+            f"⬇️ Pengeluaran : Rp{total_keluar:,.2f}\n"
+            f"📊 Net         : Rp{total_masuk - total_keluar:,.2f}"
         )
+        if n_neraca:
+            footer += f"\n⏸️ {n_neraca} transaksi pos-neraca (transfer/kas RT/hutang/titipan) tidak dihitung"
+        lines.append(footer)
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error hari_ini: {e}")
@@ -626,6 +654,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     parsed["akun"] = akun_valid
 
+    # Prefix single/directional (Income, Kas RT, Hutang, Piutang, Bisnis, Adek, Transfer, Lain)
+    # ditentukan langsung dari prefix + jenis, tanpa fuzzy matching.
+    prefix_std = resolve_prefix(parsed["prefix"])
+    forced = resolve_forced_category(prefix_std, parsed["jenis"])
+    if forced:
+        parsed["kategori"] = forced
+        user_state[chat_id] = {"stage": "awaiting_confirm", "data": parsed}
+        await update.message.reply_text(build_preview(parsed), parse_mode="Markdown")
+        return
+
     kategori = best_match(parsed["prefix"], parsed["deskripsi"], threshold=0.8)
     if kategori:
         parsed["kategori"] = kategori
@@ -646,8 +684,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+def _load_master_categories():
+    """Best-effort: muat kategori + tipe dari sheet Data Master, timpa default config."""
+    try:
+        master = get_master_categories()
+        if master:
+            # Union daftar kategori; tipe kategori yang sudah dikenal config diprioritaskan
+            # (agar [Income]/[Bisnis] tak salah klasifikasi bila sheet tak punya kolom Tipe).
+            merged = {**master, **config.CATEGORY_TYPES}
+            config.CATEGORY_TYPES = merged
+            config.VALID_CATEGORIES = list(merged.keys())
+            logger.info(f"Loaded {len(master)} kategori dari sheet '{config.MASTER_SHEET_NAME}'.")
+        else:
+            logger.info("Sheet Data Master tak terbaca; pakai kategori bawaan config.")
+    except Exception as e:
+        logger.warning(f"Gagal load Data Master ({e}); pakai kategori bawaan config.")
+
+
 def main():
     token = os.environ["TELEGRAM_BOT_TOKEN"]
+    _load_master_categories()
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
