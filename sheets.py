@@ -321,6 +321,37 @@ def get_kas_rt_buku() -> float | None:
         return None
 
 
+def get_hutang_from_dashboard() -> tuple[float | None, list[tuple[str, float]]]:
+    """Baca blok hutang dari dashboard bulan ini (H23:M28).
+
+    Layout: H=Pemberi, I=Pinjaman, J=Dibayar, K=Sisa, ... baris terakhir = TOTAL (K28).
+    Return (total_sisa, [(pemberi, sisa), ...]). total_sisa None bila tak terbaca.
+    """
+    try:
+        sheet = _get_sheet(get_dashboard_sheet_name())
+        rows = sheet.get_values("H23:M28")
+    except Exception:
+        return None, []
+    if not rows:
+        return None, []
+
+    def cell(r: int, c: int) -> str:
+        return rows[r][c].strip() if r < len(rows) and c < len(rows[r]) else ""
+
+    # Total sisa = kolom K (indeks 3) pada baris terakhir blok (K28)
+    total_raw = cell(len(rows) - 1, 3)
+    total = _parse_rupiah(total_raw) if total_raw else None
+
+    rincian: list[tuple[str, float]] = []
+    for r in range(len(rows) - 1):  # kecuali baris TOTAL
+        pemberi = cell(r, 0)
+        if not pemberi or pemberi.lower() in ("pemberi", "total"):
+            continue
+        sisa_raw = cell(r, 3)
+        rincian.append((pemberi, _parse_rupiah(sisa_raw) if sisa_raw else 0.0))
+    return total, rincian
+
+
 def get_saldo_dari_dashboard() -> tuple[dict[str, float], float, float]:
     """Kembalikan (saldo_per_akun, total_tanpa_blu, total_dengan_blu)."""
     sheet_name = get_dashboard_sheet_name()

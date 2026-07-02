@@ -28,6 +28,7 @@ from sheets import (
     get_transaksi_hari_ini,
     get_all_transactions,
     get_kas_rt_buku,
+    get_hutang_from_dashboard,
     format_saldo_rekap,
     get_master_categories,
 )
@@ -495,27 +496,30 @@ def _fmt_items(items: list[dict], limit: int = 10) -> list[str]:
 
 
 async def cmd_hutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Menghitung posisi hutang...")
+    await update.message.reply_text("⏳ Mengambil posisi hutang...")
     try:
-        txns = get_all_transactions()
-        items = [t for t in txns if t["kategori"].startswith("[Hutang]")]
-        terima = sum(t["debit"] for t in items)   # [Hutang] Terima (pinjaman masuk)
-        bayar = sum(t["kredit"] for t in items)    # [Hutang] Bayar (pelunasan keluar)
-        sisa = terima - bayar
+        total, rincian = get_hutang_from_dashboard()
+        dash = get_dashboard_sheet_name()
 
         lines = ["💳 *Posisi Hutang*\n"]
-        lines.append(f"➕ Pinjaman diterima : Rp{terima:,.2f}")
-        lines.append(f"➖ Sudah dibayar     : Rp{bayar:,.2f}")
-        lines.append(f"*🔴 Sisa hutang      : Rp{sisa:,.2f}*")
-        if items:
-            lines.append("\n_Rincian terbaru:_")
-            lines += _fmt_items(items)
+        if total is None:
+            lines.append(
+                f"⚠️ Sel {dash}!K28 kosong/tak terbaca.\n"
+                "Pastikan blok hutang terisi di dashboard (H23:M28)."
+            )
         else:
-            lines.append("\n_Belum ada transaksi berkategori [Hutang]._")
+            lines.append(f"*🔴 Sisa hutang: Rp{total:,.2f}*  _(sumber: {dash}!K28)_")
+
+        rincian_aktif = [(p, s) for p, s in rincian if s > 0]
+        if rincian_aktif:
+            lines.append("\n_Rincian per pemberi:_")
+            for pemberi, sisa in rincian_aktif:
+                lines.append(f"  • {pemberi}: Rp{sisa:,.0f}")
+
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error hutang: {e}")
-        await update.message.reply_text(f"❌ Gagal hitung hutang: {e}")
+        await update.message.reply_text(f"❌ Gagal ambil hutang: {e}")
 
 
 async def cmd_piutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
