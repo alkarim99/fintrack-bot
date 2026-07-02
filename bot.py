@@ -18,7 +18,7 @@ from telegram.ext import (
     filters,
 )
 import config
-from config import today_str, resolve_forced_category, category_type
+from config import today_str, resolve_forced_category, category_type, get_dashboard_sheet_name
 from matcher import match_category, best_match, match_account, format_category_choices, resolve_prefix
 from sheets import (
     append_transaction,
@@ -26,6 +26,8 @@ from sheets import (
     get_saldo_dari_dashboard,
     get_riwayat,
     get_transaksi_hari_ini,
+    get_all_transactions,
+    get_kas_rt_buku,
     format_saldo_rekap,
     get_master_categories,
 )
@@ -254,6 +256,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /saldo — Rekap saldo per akun. Filter: /saldo BCA, Mandiri\n"
         "  /riwayat — 10 transaksi terakhir. Filter: /riwayat BCA\n"
         "  /hari\\_ini — Ringkasan transaksi hari ini\n\n"
+        "🧮 *Neraca*\n"
+        "  /hutang — Sisa hutang berjalan\n"
+        "  /piutang — Sisa piutang berjalan\n"
+        "  /kasrt — Rekonsiliasi kas RT. Cek lubang: /kasrt 19584000\n\n"
         "⚙️ *Lainnya*\n"
         "  /batal — Batalkan input yang sedang berjalan\n"
         "  /help — Tampilkan pesan ini\n\n"
@@ -475,6 +481,119 @@ async def cmd_hari_ini(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error hari_ini: {e}")
         await update.message.reply_text(f"❌ Gagal ambil data hari ini: {e}")
+
+
+def _fmt_items(items: list[dict], limit: int = 10) -> list[str]:
+    """Format ringkas beberapa transaksi terakhir (terbaru dulu)."""
+    lines = []
+    for t in items[-limit:][::-1]:
+        arah = "➕" if t["debit"] > 0 else "➖"
+        nominal = t["debit"] if t["debit"] > 0 else t["kredit"]
+        desc = t["deskripsi"][:32]
+        lines.append(f"  {arah} {t['tanggal']} · {desc} · Rp{nominal:,.0f}")
+    return lines
+
+
+async def cmd_hutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Menghitung posisi hutang...")
+    try:
+        txns = get_all_transactions()
+        items = [t for t in txns if t["kategori"].startswith("[Hutang]")]
+        terima = sum(t["debit"] for t in items)   # [Hutang] Terima (pinjaman masuk)
+        bayar = sum(t["kredit"] for t in items)    # [Hutang] Bayar (pelunasan keluar)
+        sisa = terima - bayar
+
+        lines = ["💳 *Posisi Hutang*\n"]
+        lines.append(f"➕ Pinjaman diterima : Rp{terima:,.2f}")
+        lines.append(f"➖ Sudah dibayar     : Rp{bayar:,.2f}")
+        lines.append(f"*🔴 Sisa hutang      : Rp{sisa:,.2f}*")
+        if items:
+            lines.append("\n_Rincian terbaru:_")
+            lines += _fmt_items(items)
+        else:
+            lines.append("\n_Belum ada transaksi berkategori [Hutang]._")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error hutang: {e}")
+        await update.message.reply_text(f"❌ Gagal hitung hutang: {e}")
+
+
+async def cmd_piutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Menghitung posisi piutang...")
+    try:
+        txns = get_all_transactions()
+        items = [t for t in txns if t["kategori"].startswith("[Piutang]")]
+        ditalangi = sum(t["kredit"] for t in items)  # [Piutang] Tambah (uang keluar dipinjamkan)
+        kembali = sum(t["debit"] for t in items)       # [Piutang] Terima (dibayar balik)
+        sisa = ditalangi - kembali
+
+        lines = ["🤝 *Posisi Piutang*\n"]
+        lines.append(f"➖ Ditalangi/dipinjamkan : Rp{ditalangi:,.2f}")
+        lines.append(f"➕ Sudah dikembalikan    : Rp{kembali:,.2f}")
+        lines.append(f"*🟢 Sisa piutang         : Rp{sisa:,.2f}*")
+        if items:
+            lines.append("\n_Rincian terbaru:_")
+            lines += _fmt_items(items)
+        else:
+            lines.append("\n_Belum ada transaksi berkategori [Piutang]._")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error piutang: {e}")
+        await update.message.reply_text(f"❌ Gagal hitung piutang: {e}")
+
+
+async def cmd_kasrt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Merekonsiliasi kas RT...")
+    try:
+        txns = get_all_transactions()
+        masuk = sum(t["debit"] for t in txns if t["kategori"].startswith("[Kas RT]"))
+        keluar = sum(t["kredit"] for t in txns if t["kategori"].startswith("[Kas RT]"))
+        net = masuk - keluar
+
+        blu = None
+        try:
+            saldo, _, _ = get_saldo_dari_dashboard()
+            blu = saldo.get("Blu Saving")
+        except Exception:
+            pass
+
+        lines = ["🏘️ *Rekonsiliasi Kas RT*\n"]
+        lines.append(f"📥 Kas RT masuk (ledger)  : Rp{masuk:,.2f}")
+        lines.append(f"📤 Kas RT keluar (ledger) : Rp{keluar:,.2f}")
+        lines.append(f"📊 Net kas RT (ledger)    : Rp{net:,.2f}")
+        if blu is not None:
+            lines.append(f"🏦 Saldo Blu Saving (fisik): Rp{blu:,.2f}")
+
+        # Saldo buku bendahara: dari argumen bila ada, jika tidak baca dari dashboard M19
+        if context.args:
+            buku = parse_nominal(" ".join(context.args))
+            buku_src = "input manual"
+        else:
+            buku = get_kas_rt_buku()
+            buku_src = f"dashboard {get_dashboard_sheet_name()}!M19"
+
+        if buku is None:
+            if context.args:
+                lines.append("\n⚠️ Angka buku bendahara tak terbaca. Contoh: `/kasrt 19584000`")
+            else:
+                lines.append(f"\n⚠️ Sel {get_dashboard_sheet_name()}!M19 kosong/tak terbaca. "
+                             "Isi saldo buku di sel itu, atau kirim manual: `/kasrt 19584000`")
+        elif blu is None:
+            lines.append("\n⚠️ Saldo Blu Saving tak tersedia dari dashboard.")
+        else:
+            lubang = buku - blu
+            lines.append(f"\n📒 Buku bendahara : Rp{buku:,.2f}  _(sumber: {buku_src})_")
+            if abs(lubang) < 1:
+                lines.append("✅ *Sesuai — tidak ada lubang.*")
+            elif lubang > 0:
+                lines.append(f"🔴 *LUBANG (kurang): Rp{lubang:,.2f}*")
+            else:
+                lines.append(f"🟢 *LEBIH: Rp{-lubang:,.2f}*")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error kasrt: {e}")
+        await update.message.reply_text(f"❌ Gagal rekonsiliasi kas RT: {e}")
 
 
 async def cmd_batal(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -713,6 +832,9 @@ def main():
     app.add_handler(CommandHandler("transfer", cmd_transfer))
     app.add_handler(CommandHandler("riwayat", cmd_riwayat))
     app.add_handler(CommandHandler("hari_ini", cmd_hari_ini))
+    app.add_handler(CommandHandler("hutang", cmd_hutang))
+    app.add_handler(CommandHandler("piutang", cmd_piutang))
+    app.add_handler(CommandHandler("kasrt", cmd_kasrt))
     app.add_handler(CommandHandler("batal", cmd_batal))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

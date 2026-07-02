@@ -274,6 +274,27 @@ def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
         return result
 
 
+def get_all_transactions() -> list[dict]:
+    """Ambil seluruh baris transaksi (parsed) dari Transaction Log dalam satu batch."""
+    sheet = _get_sheet(TRANSACTION_SHEET_NAME)
+    col_a = sheet.col_values(1)
+    last_row = 1
+    for i, val in enumerate(col_a, start=1):
+        if i == 1:
+            continue
+        if val.strip():
+            last_row = i
+    if last_row < 2:
+        return []
+    rows = sheet.get_values(f"A2:G{last_row}")
+    result = []
+    for row in rows:
+        parsed = _parse_row(row)
+        if parsed:
+            result.append(parsed)
+    return result
+
+
 def get_transaksi_hari_ini(tanggal: str) -> list[dict]:
     """Ambil semua transaksi di tanggal tertentu."""
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
@@ -283,6 +304,21 @@ def get_transaksi_hari_ini(tanggal: str) -> list[dict]:
         if str(r.get("Tanggal", "")).strip() == tanggal
         and str(r.get("Akun/Rekening", "")).strip()
     ]
+
+
+def get_kas_rt_buku() -> float | None:
+    """Baca saldo kas RT menurut buku bendahara dari dashboard bulan ini (sel M19).
+
+    Kembalikan None bila sel kosong atau sheet tak terbaca.
+    """
+    try:
+        sheet = _get_sheet(get_dashboard_sheet_name())
+        val = sheet.cell(19, 13).value  # M19 (kolom M = 13, baris 19)
+        if val is None or str(val).strip() == "":
+            return None
+        return _parse_rupiah(val)
+    except Exception:
+        return None
 
 
 def get_saldo_dari_dashboard() -> tuple[dict[str, float], float, float]:
