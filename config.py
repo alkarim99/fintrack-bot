@@ -163,6 +163,14 @@ TRANSACTION_SHEET_NAME = "Transaction Log"  # sesuaikan dengan nama tab di sprea
 TEMP_SHEET_NAME = "Temp"                    # tab sementara sebelum konfirmasi
 MASTER_SHEET_NAME = "Data Master"           # tab berisi daftar kategori (kolom: Kategori, Tipe)
 
+# ─── Target anggaran bulanan (dari template audit) ─────────────────────────────
+# Per grup pengeluaran. Bisa dipindah ke dashboard bila ingin diubah tanpa deploy.
+BUDGET_TARGETS = {
+    "Pokok": 4_500_000,
+    "Kakak": 2_400_000,
+    "Adek": 100_000,
+}
+
 # ─── Format tanggal ───────────────────────────────────────────────────────────
 DATE_FORMAT = "%Y/%m/%d"
 

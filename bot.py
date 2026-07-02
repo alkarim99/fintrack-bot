@@ -18,7 +18,7 @@ from telegram.ext import (
     filters,
 )
 import config
-from config import today_str, resolve_forced_category, category_type, get_dashboard_sheet_name
+from config import today_str, resolve_forced_category, category_type, get_dashboard_sheet_name, WIB
 from matcher import match_category, best_match, match_account, format_category_choices, resolve_prefix
 from sheets import (
     append_transaction,
@@ -256,7 +256,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 *Laporan*\n"
         "  /saldo — Rekap saldo per akun. Filter: /saldo BCA, Mandiri\n"
         "  /riwayat — 10 transaksi terakhir. Filter: /riwayat BCA\n"
-        "  /hari\\_ini — Ringkasan transaksi hari ini\n\n"
+        "  /hari\\_ini — Ringkasan transaksi hari ini\n"
+        "  /anggaran — Realisasi belanja vs target bulan ini\n\n"
         "🧮 *Neraca*\n"
         "  /hutang — Sisa hutang berjalan\n"
         "  /piutang — Sisa piutang berjalan\n"
@@ -600,6 +601,68 @@ async def cmd_kasrt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Gagal rekonsiliasi kas RT: {e}")
 
 
+def _bar(frac: float, width: int = 10) -> str:
+    frac = max(0.0, min(1.0, frac))
+    filled = round(frac * width)
+    return "▓" * filled + "░" * (width - filled)
+
+
+async def cmd_anggaran(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Menghitung realisasi anggaran...")
+    try:
+        import calendar
+        from datetime import datetime
+
+        now = datetime.now(WIB)
+        month_prefix = today_str()[:7]  # "YYYY/MM"
+        dim = calendar.monthrange(now.year, now.month)[1]
+        pace = now.day / dim
+
+        txns = get_all_transactions()
+        spent = {g: 0.0 for g in config.BUDGET_TARGETS}
+        cicilan = 0.0
+        for t in txns:
+            if not str(t["tanggal"]).startswith(month_prefix):
+                continue
+            kat = t["kategori"]
+            if category_type(kat) == "pengeluaran":
+                for g in spent:
+                    if kat.startswith(f"[{g}]"):
+                        spent[g] += t["kredit"]
+                        break
+            elif kat == "[Hutang] Bayar":
+                cicilan += t["kredit"]
+
+        lines = [f"📊 *Anggaran {config.MONTH_ABBR[now.month]}* (hari ke-{now.day}/{dim})\n"]
+        total_spent = 0.0
+        total_target = 0.0
+        for g, target in config.BUDGET_TARGETS.items():
+            s = spent[g]
+            total_spent += s
+            total_target += target
+            frac = s / target if target else 0.0
+            sisa = target - s
+            warn = " ⚠️" if s > target else (" 🔸" if frac > pace + 0.1 else "")
+            lines.append(
+                f"*{g}*  {_bar(frac)} {frac*100:.0f}%{warn}\n"
+                f"   Rp{s:,.0f} / Rp{target:,.0f} · sisa Rp{sisa:,.0f}"
+            )
+
+        net_sisa = total_target - total_spent
+        lines.append(
+            f"─────────────────\n"
+            f"Total belanja: Rp{total_spent:,.0f} / Rp{total_target:,.0f}\n"
+            f"Sisa anggaran: Rp{net_sisa:,.0f}\n"
+            f"Cicilan hutang bulan ini: Rp{cicilan:,.0f}"
+        )
+        lines.append(f"\n💡 Laju ideal ~{pace*100:.0f}% terpakai. 🔸=di atas laju, ⚠️=lewat target.")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error anggaran: {e}")
+        await update.message.reply_text(f"❌ Gagal hitung anggaran: {e}")
+
+
 async def cmd_batal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_state.pop(chat_id, None)
@@ -839,6 +902,7 @@ def main():
     app.add_handler(CommandHandler("hutang", cmd_hutang))
     app.add_handler(CommandHandler("piutang", cmd_piutang))
     app.add_handler(CommandHandler("kasrt", cmd_kasrt))
+    app.add_handler(CommandHandler("anggaran", cmd_anggaran))
     app.add_handler(CommandHandler("batal", cmd_batal))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
