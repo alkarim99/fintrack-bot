@@ -167,8 +167,8 @@ MASTER_SHEET_NAME = "Data Master"           # tab berisi daftar kategori (kolom:
 # Per grup pengeluaran. Bisa dipindah ke dashboard bila ingin diubah tanpa deploy.
 BUDGET_TARGETS = {
     "Pokok": 4_500_000,
-    "Kakak": 2_400_000,
-    "Adek": 100_000,
+    "Kakak": 3_500_000,
+    "Adek": 150_000,
 }
 
 # ─── Format tanggal ───────────────────────────────────────────────────────────
