@@ -2,6 +2,7 @@ import asyncio
 import functools
 import os
 import re
+import time
 import gspread
 from google.oauth2.service_account import Credentials
 from config import (
@@ -18,6 +19,34 @@ def _to_async(fn):
     async def wrapper(*args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
     return wrapper
+
+
+# Simple TTL cache untuk read operations — invalidasi saat ada transaksi baru
+_cache_store: dict[tuple, tuple] = {}  # key → (result, expiry_time)
+
+
+def _cache_clear():
+    """Hapus semua cache (dipanggil setelah transaksi ditulis)."""
+    _cache_store.clear()
+
+
+def _cached(ttl: int = 30):
+    """Decorator: cache hasil fungsi sync dengan TTL (detik)."""
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = (fn.__name__, args, tuple(sorted(kwargs.items())))
+            now = time.time()
+            if key in _cache_store:
+                result, expiry = _cache_store[key]
+                if now < expiry:
+                    return result
+            result = fn(*args, **kwargs)
+            _cache_store[key] = (result, now + ttl)
+            return result
+        return wrapper
+    return decorator
+
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -168,6 +197,7 @@ def _write_row(sheet, tanggal, deskripsi, kategori, akun, debit, kredit, keteran
     # Baca saldo hasil formula
     saldo_raw = sheet.cell(target_row, 7).value
     _last_row = target_row + 1
+    _cache_clear()  # invalidasi semua cache karena data sudah berubah
     return target_row, _parse_rupiah(saldo_raw or "0")
 
 
@@ -243,6 +273,7 @@ def _parse_row(row: list[str]) -> dict | None:
 
 
 @_to_async
+@_cached(ttl=15)
 def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
     """Ambil n transaksi terakhir dari Transaction Log. Optional filter by akun.
 
@@ -299,6 +330,7 @@ def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
 
 
 @_to_async
+@_cached(ttl=30)
 def get_all_transactions() -> list[dict]:
     """Ambil seluruh baris transaksi (parsed) dari Transaction Log dalam satu batch."""
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
@@ -321,6 +353,7 @@ def get_all_transactions() -> list[dict]:
 
 
 @_to_async
+@_cached(ttl=15)
 def get_transaksi_hari_ini(tanggal: str) -> list[dict]:
     """Ambil semua transaksi di tanggal tertentu."""
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
@@ -333,6 +366,7 @@ def get_transaksi_hari_ini(tanggal: str) -> list[dict]:
 
 
 @_to_async
+@_cached(ttl=60)
 def get_kas_rt_buku() -> float | None:
     """Baca saldo kas RT menurut buku bendahara dari dashboard bulan ini (sel M19).
 
@@ -349,6 +383,7 @@ def get_kas_rt_buku() -> float | None:
 
 
 @_to_async
+@_cached(ttl=60)
 def get_hutang_from_dashboard() -> tuple[float | None, list[tuple[str, float]]]:
     """Baca blok hutang dari dashboard bulan ini (H23:M28).
 
@@ -381,6 +416,7 @@ def get_hutang_from_dashboard() -> tuple[float | None, list[tuple[str, float]]]:
 
 
 @_to_async
+@_cached(ttl=60)
 def get_saldo_dari_dashboard() -> tuple[dict[str, float], float, float]:
     """Kembalikan (saldo_per_akun, total_tanpa_blu, total_dengan_blu)."""
     sheet_name = get_dashboard_sheet_name()
