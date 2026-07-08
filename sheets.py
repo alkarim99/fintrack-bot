@@ -1,3 +1,5 @@
+import asyncio
+import functools
 import os
 import re
 import gspread
@@ -8,6 +10,14 @@ from config import (
     today_str,
     get_dashboard_sheet_name,
 )
+
+
+def _to_async(fn):
+    """Decorator: jalankan fungsi sync di thread terpisah agar tidak memblokir event loop."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return wrapper
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -112,14 +122,22 @@ def get_last_saldo() -> float:
     return 0.0
 
 
+_last_row = None  # cache baris kosong pertama, hindari full column scan tiap simpan
+
+
 def _find_first_empty_row(sheet) -> int:
+    global _last_row
+    if _last_row is not None:
+        return _last_row
     col_a = sheet.col_values(1)
     for i, val in enumerate(col_a, start=1):
         if i == 1:
             continue
         if not val.strip():
+            _last_row = i
             return i
-    return len(col_a) + 1
+    _last_row = len(col_a) + 1
+    return _last_row
 
 
 def _write_row(sheet, tanggal, deskripsi, kategori, akun, debit, kredit, keterangan=""):
@@ -127,6 +145,7 @@ def _write_row(sheet, tanggal, deskripsi, kategori, akun, debit, kredit, keteran
     Tulis satu baris transaksi ke baris kosong pertama.
     Returns: (target_row, new_saldo)
     """
+    global _last_row
     target_row = _find_first_empty_row(sheet)
     prev_row = target_row - 1
 
@@ -138,18 +157,21 @@ def _write_row(sheet, tanggal, deskripsi, kategori, akun, debit, kredit, keteran
         debit if debit != 0 else "",
         kredit if kredit != 0 else "",
     ]
-    sheet.update(f"A{target_row}:F{target_row}", [row_data], value_input_option="USER_ENTERED")
-    sheet.update(f"H{target_row}", [[keterangan]], value_input_option="USER_ENTERED")
-    sheet.update(
-        f"G{target_row}",
-        [[f"=G{prev_row}+E{target_row}-F{target_row}"]],
-        value_input_option="USER_ENTERED"
-    )
+
+    # Batch update: gabung 3 API call jadi 1
+    sheet.batch_update([
+        {"range": f"A{target_row}:F{target_row}", "values": [row_data]},
+        {"range": f"H{target_row}", "values": [[keterangan]]},
+        {"range": f"G{target_row}", "values": [[f"=G{prev_row}+E{target_row}-F{target_row}"]]},
+    ], value_input_option="USER_ENTERED")
+
     # Baca saldo hasil formula
     saldo_raw = sheet.cell(target_row, 7).value
+    _last_row = target_row + 1
     return target_row, _parse_rupiah(saldo_raw or "0")
 
 
+@_to_async
 def append_transaction(
     tanggal: str,
     deskripsi: str,
@@ -165,6 +187,7 @@ def append_transaction(
     return new_saldo
 
 
+@_to_async
 def append_transfer(
     tanggal: str,
     akun_asal: str,
@@ -219,6 +242,7 @@ def _parse_row(row: list[str]) -> dict | None:
     }
 
 
+@_to_async
 def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
     """Ambil n transaksi terakhir dari Transaction Log. Optional filter by akun.
 
@@ -274,6 +298,7 @@ def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
         return result
 
 
+@_to_async
 def get_all_transactions() -> list[dict]:
     """Ambil seluruh baris transaksi (parsed) dari Transaction Log dalam satu batch."""
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
@@ -295,6 +320,7 @@ def get_all_transactions() -> list[dict]:
     return result
 
 
+@_to_async
 def get_transaksi_hari_ini(tanggal: str) -> list[dict]:
     """Ambil semua transaksi di tanggal tertentu."""
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
@@ -306,6 +332,7 @@ def get_transaksi_hari_ini(tanggal: str) -> list[dict]:
     ]
 
 
+@_to_async
 def get_kas_rt_buku() -> float | None:
     """Baca saldo kas RT menurut buku bendahara dari dashboard bulan ini (sel M19).
 
@@ -321,6 +348,7 @@ def get_kas_rt_buku() -> float | None:
         return None
 
 
+@_to_async
 def get_hutang_from_dashboard() -> tuple[float | None, list[tuple[str, float]]]:
     """Baca blok hutang dari dashboard bulan ini (H23:M28).
 
@@ -352,6 +380,7 @@ def get_hutang_from_dashboard() -> tuple[float | None, list[tuple[str, float]]]:
     return total, rincian
 
 
+@_to_async
 def get_saldo_dari_dashboard() -> tuple[dict[str, float], float, float]:
     """Kembalikan (saldo_per_akun, total_tanpa_blu, total_dengan_blu)."""
     sheet_name = get_dashboard_sheet_name()

@@ -273,7 +273,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Mengambil data saldo...")
     try:
-        saldo, total_tanpa_blu, total_dengan_blu = get_saldo_dari_dashboard()
+        saldo, total_tanpa_blu, total_dengan_blu = await get_saldo_dari_dashboard()
 
         # Filter by account jika ada argumen (contoh: /saldo BCA, Mandiri)
         if context.args:
@@ -410,7 +410,7 @@ async def cmd_riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not akun_list:
                     return
 
-        rows = get_riwayat(n=10, akun_list=akun_list)
+        rows = await get_riwayat(n=10, akun_list=akun_list)
         if not rows:
             filter_info = f" untuk akun {', '.join(akun_list)}" if akun_list else ""
             await update.message.reply_text(f"Belum ada transaksi{filter_info}.")
@@ -437,7 +437,7 @@ async def cmd_hari_ini(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Mengambil transaksi hari ini...")
     try:
         tanggal = today_str()
-        rows = get_transaksi_hari_ini(tanggal)
+        rows = await get_transaksi_hari_ini(tanggal)
         if not rows:
             await update.message.reply_text(f"Belum ada transaksi hari ini ({tanggal}).")
             return
@@ -499,7 +499,7 @@ def _fmt_items(items: list[dict], limit: int = 10) -> list[str]:
 async def cmd_hutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Mengambil posisi hutang...")
     try:
-        total, rincian = get_hutang_from_dashboard()
+        total, rincian = await get_hutang_from_dashboard()
         dash = get_dashboard_sheet_name()
 
         lines = ["💳 *Posisi Hutang*\n"]
@@ -526,7 +526,7 @@ async def cmd_hutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_piutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Menghitung posisi piutang...")
     try:
-        txns = get_all_transactions()
+        txns = await get_all_transactions()
         items = [t for t in txns if t["kategori"].startswith("[Piutang]")]
         ditalangi = sum(t["kredit"] for t in items)  # [Piutang] Tambah (uang keluar dipinjamkan)
         kembali = sum(t["debit"] for t in items)       # [Piutang] Terima (dibayar balik)
@@ -550,14 +550,14 @@ async def cmd_piutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_kasrt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Merekonsiliasi kas RT...")
     try:
-        txns = get_all_transactions()
+        txns = await get_all_transactions()
         masuk = sum(t["debit"] for t in txns if t["kategori"].startswith("[Kas RT]"))
         keluar = sum(t["kredit"] for t in txns if t["kategori"].startswith("[Kas RT]"))
         net = masuk - keluar
 
         blu = None
         try:
-            saldo, _, _ = get_saldo_dari_dashboard()
+            saldo, _, _ = await get_saldo_dari_dashboard()
             blu = saldo.get("Blu Saving")
         except Exception:
             pass
@@ -574,7 +574,7 @@ async def cmd_kasrt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buku = parse_nominal(" ".join(context.args))
             buku_src = "input manual"
         else:
-            buku = get_kas_rt_buku()
+            buku = await get_kas_rt_buku()
             buku_src = f"dashboard {get_dashboard_sheet_name()}!M19"
 
         if buku is None:
@@ -618,7 +618,7 @@ async def cmd_anggaran(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dim = calendar.monthrange(now.year, now.month)[1]
         pace = now.day / dim
 
-        txns = get_all_transactions()
+        txns = await get_all_transactions()
         spent = {g: 0.0 for g in config.BUDGET_TARGETS}
         cicilan = 0.0
         for t in txns:
@@ -713,7 +713,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 debit = data["nominal_float"] if data["jenis"] == "masuk" else 0.0
                 kredit = data["nominal_float"] if data["jenis"] == "keluar" else 0.0
-                new_saldo = append_transaction(
+                new_saldo = await append_transaction(
                     tanggal=data["tanggal"],
                     deskripsi=data["deskripsi"],
                     kategori=data["kategori"],
@@ -748,7 +748,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if text.lower() == "ok":
             try:
-                new_saldo = append_transfer(
+                new_saldo = await append_transfer(
                     tanggal=data["tanggal"],
                     akun_asal=data["dari"],
                     akun_tujuan=data["ke"],
