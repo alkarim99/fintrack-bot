@@ -265,6 +265,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /kasrt — Rekonsiliasi kas RT. Cek lubang: /kasrt 19584000\n\n"
         "⚙️ *Lainnya*\n"
         "  /batal — Batalkan input yang sedang berjalan\n"
+        "  /refresh — Reset cache, paksa baca ulang spreadsheet\n"
         "  /help — Tampilkan pesan ini\n\n"
         "💡 Atau langsung kirim transaksi tanpa command menggunakan format dari /format",
         parse_mode="Markdown",
