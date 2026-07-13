@@ -30,6 +30,13 @@ def _cache_clear():
     _cache_store.clear()
 
 
+def refresh_cache():
+    """Reset _last_row dan hapus TTL cache — paksa re-scan spreadsheet berikutnya."""
+    global _last_row
+    _last_row = None
+    _cache_store.clear()
+
+
 def _cached(ttl: int = 30):
     """Decorator: cache hasil fungsi sync dengan TTL (detik)."""
     def decorator(fn):

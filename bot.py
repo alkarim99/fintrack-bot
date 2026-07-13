@@ -31,6 +31,7 @@ from sheets import (
     get_hutang_from_dashboard,
     format_saldo_rekap,
     get_master_categories,
+    refresh_cache,
 )
 
 logging.basicConfig(
@@ -669,6 +670,11 @@ async def cmd_batal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Transaksi dibatalkan.")
 
 
+async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    refresh_cache()
+    await update.message.reply_text("✅ Cache di-refresh. Data akan dibaca ulang dari spreadsheet.")
+
+
 # ─── Message Handler ──────────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -904,6 +910,7 @@ def main():
     app.add_handler(CommandHandler("kasrt", cmd_kasrt))
     app.add_handler(CommandHandler("anggaran", cmd_anggaran))
     app.add_handler(CommandHandler("batal", cmd_batal))
+    app.add_handler(CommandHandler("refresh", cmd_refresh))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Fintrack Bot starting...")
