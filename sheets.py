@@ -37,12 +37,21 @@ def refresh_cache():
     _cache_store.clear()
 
 
+def _make_hashable(obj):
+    """Rekursif konversi list/dict ke tuple agar hashable."""
+    if isinstance(obj, list):
+        return tuple(_make_hashable(v) for v in obj)
+    if isinstance(obj, dict):
+        return tuple(sorted((k, _make_hashable(v)) for k, v in obj.items()))
+    return obj
+
+
 def _cached(ttl: int = 30):
     """Decorator: cache hasil fungsi sync dengan TTL (detik)."""
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            key = (fn.__name__, args, tuple(sorted(kwargs.items())))
+            key = (_make_hashable(fn.__name__), _make_hashable(args), _make_hashable(tuple(sorted(kwargs.items()))))
             now = time.time()
             if key in _cache_store:
                 result, expiry = _cache_store[key]
