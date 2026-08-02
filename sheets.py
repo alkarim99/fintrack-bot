@@ -38,8 +38,8 @@ def refresh_cache():
 
 
 def _make_hashable(obj):
-    """Rekursif konversi list/dict ke tuple agar hashable."""
-    if isinstance(obj, list):
+    """Rekursif konversi list/dict/tuple ke tuple agar hashable."""
+    if isinstance(obj, (list, tuple)):
         return tuple(_make_hashable(v) for v in obj)
     if isinstance(obj, dict):
         return tuple(sorted((k, _make_hashable(v)) for k, v in obj.items()))
