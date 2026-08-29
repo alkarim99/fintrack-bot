@@ -60,11 +60,11 @@ ALAMAT_Y1 = 225
 
 # ─── Field kanan: Tanggal & Kepada (solid underline di bawah value) ───────────
 FIELD_LABEL_X = 570
-FIELD_VALUE_X = 705
 FIELD_VALUE_LINE_END_X = 1013
 FIELD_TANGGAL_Y = 135
 FIELD_KEPADA_Y = 210
 FIELD_UNDERLINE_OFFSET_Y = 12
+FIELD_LABEL_VALUE_GAP = 24   # px minimum antara akhir teks label dan awal value
 
 # ─── Tabel ────────────────────────────────────────────────────────────────────
 TABLE_Y0 = 335
@@ -73,14 +73,14 @@ ROW_H = 42
 TOTAL_ROW_H = 95
 
 COL_BANYAK_X0 = 60
-COL_BANYAK_W = 152
-COL_BARANG_X0 = 212
-COL_BARANG_W = 436
-COL_HARGA_X0 = 648
+COL_BANYAK_W = 185            # cukup lebar agar header "Banyak" muat penuh
+COL_BARANG_X0 = COL_BANYAK_X0 + COL_BANYAK_W
+COL_BARANG_W = 400
+COL_HARGA_X0 = COL_BARANG_X0 + COL_BARANG_W
 COL_HARGA_W = 180
-COL_JUMLAH_X0 = 828
-COL_JUMLAH_W = 192
-TABLE_X1 = 1020
+COL_JUMLAH_X0 = COL_HARGA_X0 + COL_HARGA_W
+COL_JUMLAH_W = 195
+TABLE_X1 = COL_JUMLAH_X0 + COL_JUMLAH_W   # 1020
 COL_PAD_X = 16
 
 # ─── Footer blok BCA ──────────────────────────────────────────────────────────
@@ -154,6 +154,14 @@ def tanggal_indonesia(iso: str) -> str:
 def _angka(n) -> str:
     """Angka polos gaya Indonesia: titik ribuan, tanpa desimal. Contoh: 65000 → '65.000'."""
     return f"{round(float(n)):,}".replace(",", ".")
+
+
+def _format_qty(qty) -> str:
+    """Qty bulat tampil tanpa desimal ('10' bukan '10.0'), pecahan tetap ('2.5')."""
+    qty = float(qty)
+    if qty == int(qty):
+        return str(int(qty))
+    return f"{qty:g}"
 
 
 def _fit_width(draw, text: str, font, max_w: int) -> str:
@@ -239,18 +247,19 @@ def render_nota_image(tanggal: str, nama: str, items: list[tuple], total: float,
     tx(MARGIN_LEFT, ALAMAT_Y1, ALAMAT[1], ft_addr)
 
     # ── Field kanan: Tanggal & Kepada (label + value + underline) ──────────
-    tx(FIELD_LABEL_X, FIELD_TANGGAL_Y, LABEL_TANGGAL, ft_field_label)
-    tx(FIELD_LABEL_X, FIELD_KEPADA_Y, LABEL_KEPADA, ft_field_label)
-
     tgl_text = tanggal_indonesia(tanggal)
-    nama_text = _fit_width(draw, nama, ft_field_value,
-                           (FIELD_VALUE_LINE_END_X - FIELD_VALUE_X) * S)
-    tx(FIELD_VALUE_X, FIELD_TANGGAL_Y, tgl_text, ft_field_value)
-    tx(FIELD_VALUE_X, FIELD_KEPADA_Y, nama_text, ft_field_value)
-
-    for y_field in (FIELD_TANGGAL_Y, FIELD_KEPADA_Y):
+    for label, value, y_field in [
+        (LABEL_TANGGAL, tgl_text, FIELD_TANGGAL_Y),
+        (LABEL_KEPADA, nama, FIELD_KEPADA_Y),
+    ]:
+        tx(FIELD_LABEL_X, y_field, label, ft_field_label)
+        label_w = draw.textlength(label, font=ft_field_label)
+        value_x = FIELD_LABEL_X + label_w / S + FIELD_LABEL_VALUE_GAP
+        max_w = (FIELD_VALUE_LINE_END_X - value_x) * S
+        value_text = _fit_width(draw, value, ft_field_value, max_w)
+        tx(value_x, y_field, value_text, ft_field_value)
         uy = (y_field + FONT_SIZE_VALUE + FIELD_UNDERLINE_OFFSET_Y) * S
-        draw.line([(FIELD_VALUE_X * S, uy), (FIELD_VALUE_LINE_END_X * S, uy)],
+        draw.line([(value_x * S, uy), (FIELD_VALUE_LINE_END_X * S, uy)],
                   fill=COLOR_LINE, width=LINE_WIDTH * S)
 
     # ── Tabel ──────────────────────────────────────────────────────────────
@@ -264,10 +273,16 @@ def render_nota_image(tanggal: str, nama: str, items: list[tuple], total: float,
     # Pemisah kolom vertikal
     for cx in (COL_BANYAK_X0, COL_BARANG_X0, COL_HARGA_X0, COL_JUMLAH_X0):
         draw.line([(cx * S, y0), (cx * S, y_bottom)], fill=COLOR_LINE, width=LINE_WIDTH * S)
-    # Garis horizontal: bawah header + bawah tiap baris data (termasuk pemisah total)
-    for i in range(1, body_rows + 2):
+    # Garis horizontal bawah header
+    draw.line([(x0, y0 + HEADER_ROW_H * S), (x1, y0 + HEADER_ROW_H * S)],
+              fill=COLOR_LINE, width=LINE_WIDTH * S)
+    # Garis horizontal HANYA antar baris konten (item + ongkir), bukan di blok kosong
+    for i in range(1, n_rows):
         yy = y0 + (HEADER_ROW_H + i * ROW_H) * S
         draw.line([(x0, yy), (x1, yy)], fill=COLOR_LINE, width=LINE_WIDTH * S)
+    # Garis pemisah blok kosong → baris TOTAL
+    yy = y0 + (HEADER_ROW_H + body_rows * ROW_H) * S
+    draw.line([(x0, yy), (x1, yy)], fill=COLOR_LINE, width=LINE_WIDTH * S)
 
     # Header kolom
     col_x = [(COL_BANYAK_X0, COL_BARANG_X0), (COL_BARANG_X0, COL_HARGA_X0),
@@ -279,7 +294,7 @@ def render_nota_image(tanggal: str, nama: str, items: list[tuple], total: float,
     # Baris item
     for i, (qty, nama_barang, harga) in enumerate(items):
         yc = TABLE_Y0 + HEADER_ROW_H + (i + 0.5) * ROW_H
-        cell(COL_BANYAK_X0, COL_BARANG_X0, yc, str(qty), ft_row, "center")
+        cell(COL_BANYAK_X0, COL_BARANG_X0, yc, _format_qty(qty), ft_row, "center")
         cell(COL_BARANG_X0, COL_HARGA_X0, yc, nama_barang, ft_row, "left")
         cell(COL_HARGA_X0, COL_JUMLAH_X0, yc, _angka(harga), ft_row, "right")
         cell(COL_JUMLAH_X0, TABLE_X1, yc, _angka(float(qty) * float(harga)), ft_row, "right")
