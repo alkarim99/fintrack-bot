@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 # ─── Canvas & scale ───────────────────────────────────────────────────────────
 SCALE = 3
 BASE_W = 1080                # lebar akhir (px, 1×); tinggi dinamis per jumlah baris
-MIN_BODY_ROWS = 8            # tinggi minimum body tabel (agar mirip contoh)
+MIN_BODY_ROWS = 6            # tinggi minimum body tabel (blok kosong bawah tabel)
 
 # ─── Warna ────────────────────────────────────────────────────────────────────
 COLOR_BG = (232, 201, 160)   # tan/peach
@@ -69,6 +69,7 @@ FIELD_LABEL_VALUE_GAP = 24   # px minimum antara akhir teks label dan awal value
 # ─── Tabel ────────────────────────────────────────────────────────────────────
 TABLE_Y0 = 335
 HEADER_ROW_H = 90
+HEADER_PAD_TOP = 6         # padding atas teks header kolom (~12px visual setelah ascender font)
 ROW_H = 42
 TOTAL_ROW_H = 95
 
@@ -229,17 +230,24 @@ def render_nota_image(tanggal: str, nama: str, items: list[tuple], total: float,
     def tx(x, y, text, font, fill=COLOR_TEXT, anchor="la"):
         draw.text((x * S, y * S), text, font=font, fill=fill, anchor=anchor)
 
-    def cell(x0, x1, y_center, text, font, align, fill=COLOR_TEXT):
-        """Gambar teks dalam satu kolom tabel (rata kiri/kanan/tengah), auto-truncate."""
+    def cell(x0, x1, y, text, font, align, fill=COLOR_TEXT, top=False):
+        """Gambar teks dalam satu kolom tabel (rata kiri/kanan/tengah), auto-truncate.
+
+        top=True → y diperlakukan sebagai posisi atas teks (bukan tengah baris),
+        dipakai untuk header kolom dengan padding atas.
+        """
         max_w = (x1 - x0) * S - 2 * COL_PAD_X * S
         text = _fit_width(draw, text, font, max_w)
-        yc = y_center * S
+        yp = y * S
         if align == "right":
-            draw.text((x1 * S - COL_PAD_X * S, yc), text, font=font, fill=fill, anchor="rm")
+            anchor = "ra" if top else "rm"
+            draw.text((x1 * S - COL_PAD_X * S, yp), text, font=font, fill=fill, anchor=anchor)
         elif align == "center":
-            draw.text(((x0 + x1) * S / 2, yc), text, font=font, fill=fill, anchor="mm")
+            anchor = "ma" if top else "mm"
+            draw.text(((x0 + x1) * S / 2, yp), text, font=font, fill=fill, anchor=anchor)
         else:  # left
-            draw.text((x0 * S + COL_PAD_X * S, yc), text, font=font, fill=fill, anchor="lm")
+            anchor = "la" if top else "lm"
+            draw.text((x0 * S + COL_PAD_X * S, yp), text, font=font, fill=fill, anchor=anchor)
 
     # ── Header kiri: nama usaha + alamat ───────────────────────────────────
     tx(MARGIN_LEFT, HEADER_TITLE_Y, NAMA_USAHA, ft_title)
@@ -284,12 +292,12 @@ def render_nota_image(tanggal: str, nama: str, items: list[tuple], total: float,
     yy = y0 + (HEADER_ROW_H + body_rows * ROW_H) * S
     draw.line([(x0, yy), (x1, yy)], fill=COLOR_LINE, width=LINE_WIDTH * S)
 
-    # Header kolom
+    # Header kolom (padding atas, agar tidak nempel ke garis atas tabel)
     col_x = [(COL_BANYAK_X0, COL_BARANG_X0), (COL_BARANG_X0, COL_HARGA_X0),
              (COL_HARGA_X0, COL_JUMLAH_X0), (COL_JUMLAH_X0, TABLE_X1)]
-    hy = TABLE_Y0 + HEADER_ROW_H / 2
+    hy = TABLE_Y0 + HEADER_PAD_TOP
     for i, header in enumerate(COL_HEADERS):
-        cell(col_x[i][0], col_x[i][1], hy, header, ft_head, COL_ALIGN[i])
+        cell(col_x[i][0], col_x[i][1], hy, header, ft_head, COL_ALIGN[i], top=True)
 
     # Baris item
     for i, (qty, nama_barang, harga) in enumerate(items):
