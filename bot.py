@@ -33,6 +33,7 @@ from sheets import (
     get_master_categories,
     refresh_cache,
 )
+from nota import render_nota_image
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -202,6 +203,89 @@ def parse_transfer_message(text: str) -> dict | str:
     return result
 
 
+def _tanggal_display(iso: str) -> str:
+    """Ubah tanggal 'YYYY/MM/DD' → 'DD/MM/YYYY' untuk tampilan di nota."""
+    try:
+        y, m, d = iso.split("/")
+        return f"{d}/{m}/{y}"
+    except ValueError:
+        return iso
+
+
+def parse_nota_message(text: str) -> dict | str:
+    """Parse form nota. Return dict {tanggal, nama, items, ongkir, total} atau pesan error.
+
+    Format:
+        jenis = nota
+        tanggal = DD/MM/YYYY        # opsional, default hari ini
+        nama = <nama nota / pelanggan>
+        item = <qty> | <nama barang> | <harga satuan>   # bisa diulang
+        ongkir = <nominal>                              # opsional
+        ongkir = <label> | <nominal>                    # opsional, label custom
+    """
+    result = {"tanggal": None, "nama": None, "items": [], "ongkir": None}
+
+    for line in text.strip().splitlines():
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "tanggal":
+            result["tanggal"] = value
+        elif key == "nama":
+            result["nama"] = value
+        elif key == "item":
+            parts = [p.strip() for p in value.split("|")]
+            if len(parts) != 3:
+                return (
+                    f"Format item salah: '{value}'. "
+                    "Gunakan: item = qty | nama barang | harga satuan"
+                )
+            qty_raw, nama_barang, harga_raw = parts
+            qty = parse_nominal(qty_raw)
+            harga = parse_nominal(harga_raw)
+            if qty is None or qty <= 0:
+                return f"Qty '{qty_raw}' tidak bisa dibaca (harus angka > 0)."
+            if harga is None or harga <= 0:
+                return f"Harga '{harga_raw}' tidak bisa dibaca (harus angka > 0)."
+            if not nama_barang:
+                return "Nama barang tidak boleh kosong."
+            result["items"].append((qty, nama_barang, harga))
+        elif key == "ongkir":
+            if "|" in value:
+                parts = [p.strip() for p in value.split("|")]
+                if len(parts) != 2:
+                    return (
+                        f"Format ongkir salah: '{value}'. "
+                        "Gunakan: ongkir = nominal, atau ongkir = label | nominal"
+                    )
+                label, nominal_raw = parts
+            else:
+                label, nominal_raw = "Ongkir", value
+            nominal = parse_nominal(nominal_raw)
+            if nominal is None or nominal < 0:
+                return f"Nominal ongkir '{nominal_raw}' tidak bisa dibaca."
+            result["ongkir"] = (label, nominal)
+
+    if result["nama"] is None or not result["nama"].strip():
+        return "Field 'nama' wajib diisi."
+    if not result["items"]:
+        return "Minimal satu 'item'. Format: item = qty | nama barang | harga satuan"
+
+    tanggal = result["tanggal"] or today_str()
+    parsed_tgl = parse_tanggal(tanggal)
+    if parsed_tgl is None:
+        return f"Format tanggal '{tanggal}' tidak dikenali. Gunakan: DD/MM/YYYY"
+    result["tanggal"] = parsed_tgl
+
+    total = sum(qty * harga for qty, _, harga in result["items"])
+    if result["ongkir"]:
+        total += result["ongkir"][1]
+    result["total"] = total
+    return result
+
+
 def build_preview(data: dict) -> str:
     jenis_label = "⬆️ Masuk" if data["jenis"] == "masuk" else "⬇️ Keluar"
     return (
@@ -253,7 +337,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 *Daftar Perintah Fintrack Bot*\n\n"
         "💳 *Transaksi*\n"
         "  /format — Template input transaksi\n"
-        "  /transfer — Template input transfer internal (mendukung kode unik Flip)\n\n"
+        "  /transfer — Template input transfer internal (mendukung kode unik Flip)\n"
+        "  /nota — Buat nota gambar ABD Food\n\n"
         "📊 *Laporan*\n"
         "  /saldo — Rekap saldo per akun. Filter: /saldo BCA, Mandiri\n"
         "  /riwayat — 10 transaksi terakhir. Filter: /riwayat BCA\n"
@@ -382,6 +467,34 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "```\n\n"
         "📌 *kode\\_unik:* opsional, untuk transfer Flip (selisih biaya admin)\n"
         "📌 *Tanggal (opsional):* tambahkan `tanggal = 25/04/2026` jika bukan hari ini",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_nota(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🧾 *Template Nota AbdFood*\n\n"
+        "Salin, isi, lalu kirim:\n"
+        "```\n"
+        "jenis = nota\n"
+        "tanggal = \n"
+        "nama = \n"
+        "item = \n"
+        "```\n\n"
+        "💡 *Contoh:*\n"
+        "```\n"
+        "jenis = nota\n"
+        "tanggal = 20/08/2026\n"
+        "nama = Athi' Indah\n"
+        "item = 10 | Roti Coklat Lumer | 8000\n"
+        "item = 5 | Kering Kentang Pedas | 20000\n"
+        "ongkir = Ongkir (Mobil) | 28000\n"
+        "```\n\n"
+        "📌 *item:* `qty | nama barang | harga satuan` (bisa diulang)\n"
+        "📌 *ongkir (opsional):* `ongkir = nominal` atau `ongkir = label | nominal`\n"
+        "📌 *tanggal (opsional):* default hari ini\n"
+        "📌 Bot menghitung subtotal per barang + total belanja (termasuk ongkir), "
+        "lalu mengirim *gambar nota*.",
         parse_mode="Markdown",
     )
 
@@ -826,6 +939,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(build_transfer_preview(transfer), parse_mode="Markdown")
         return
 
+    # Routing: nota gambar (standalone, tidak dicatat ke spreadsheet)
+    if jenis_raw == "nota":
+        nota = parse_nota_message(text)
+        if isinstance(nota, str):
+            await update.message.reply_text(
+                f"⚠️ {nota}\n\nGunakan /nota untuk melihat template.",
+                parse_mode="Markdown",
+            )
+            return
+        try:
+            png = render_nota_image(
+                nota["tanggal"],
+                nota["nama"],
+                nota["items"],
+                nota["total"],
+                nota["ongkir"],
+            )
+        except Exception as e:
+            logger.error(f"Error render nota: {e}")
+            await update.message.reply_text(f"❌ Gagal render nota: {e}")
+            return
+        await update.message.reply_photo(
+            photo=png,
+            filename="nota.png",
+            caption=f"🧾 Nota · {_tanggal_display(nota['tanggal'])} · "
+                    f"Total Rp{nota['total']:,.0f}",
+        )
+        return
+
     # Parse sebagai transaksi biasa
     parsed = parse_transaction_message(text)
 
@@ -904,6 +1046,7 @@ def main():
     app.add_handler(CommandHandler("saldo", cmd_saldo))
     app.add_handler(CommandHandler("format", cmd_format))
     app.add_handler(CommandHandler("transfer", cmd_transfer))
+    app.add_handler(CommandHandler("nota", cmd_nota))
     app.add_handler(CommandHandler("riwayat", cmd_riwayat))
     app.add_handler(CommandHandler("hari_ini", cmd_hari_ini))
     app.add_handler(CommandHandler("hutang", cmd_hutang))

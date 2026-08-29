@@ -16,6 +16,7 @@ Telegram bot untuk mencatat transaksi keuangan ke Google Sheets secara otomatis.
 - `/hari_ini` — ringkasan transaksi hari ini
 - `/format` — template transaksi siap copas
 - `/transfer` — template transfer internal siap copas
+- `/nota` — buat nota gambar ABD Food (hitung total otomatis)
 
 ---
 
@@ -168,6 +169,25 @@ nominal = 200rb
 
 Bot otomatis mencatat 2 baris: kredit di akun asal + debit di akun tujuan.
 
+### Buat Nota Gambar (AbdFood)
+
+Gunakan `/nota` untuk template, atau langsung kirim:
+
+```
+jenis = nota
+tanggal = 20/08/2026
+nama = Athi' Indah
+item = 10 | Roti Coklat Lumer | 8000
+item = 5 | Kering Kentang Pedas | 20000
+ongkir = Ongkir (Mobil) | 28000
+```
+
+- `tanggal` opsional (default hari ini), `nama` = nama penerima nota (label **Kepada**).
+- `item` bisa diulang: `qty | nama barang | harga satuan`.
+- `ongkir` opsional: `ongkir = nominal` atau `ongkir = label | nominal` — muncul sebagai baris di tabel (tanpa qty/harga).
+- Bot menghitung **subtotal per barang** (qty × harga) dan **total belanja** (termasuk ongkir), lalu mengirim **gambar nota** bergaya kartu invoice (tan background, tabel grid, footer BCA).
+- Nota **tidak dicatat** ke Transaction Log — berdiri sendiri.
+
 ### Alur Konfirmasi
 
 ```
@@ -188,6 +208,7 @@ Bot   → ✅ tersimpan + saldo terkini
 | `/help` | Daftar semua command |
 | `/format` | Template transaksi siap copas |
 | `/transfer` | Template transfer internal siap copas |
+| `/nota` | Buat nota gambar ABD Food (hitung total otomatis) |
 | `/saldo` | Rekap saldo per akun dari dashboard |
 | `/riwayat` | 10 transaksi terakhir |
 | `/hari_ini` | Ringkasan transaksi hari ini |
@@ -202,6 +223,8 @@ fintrack-bot/
 ├── bot.py              ← main bot & telegram handler
 ├── matcher.py          ← logika pencocokan kategori (fuzzy + keyword hints)
 ├── sheets.py           ← integrasi Google Sheets
+├── nota.py             ← render gambar nota AbdFood (Pillow)
+├── assets/             ← font sans-serif (DejaVuSans.ttf / DejaVuSans-Bold.ttf)
 ├── config.py           ← kategori, akun, konstanta, prefix map
 ├── requirements.txt
 ├── Procfile            ← untuk deploy (Railway, Fly.io, dll)
