@@ -53,6 +53,11 @@ KEYWORD_HINTS = {
     "orangtua": "kirim ke orang tua",
     "modal": "modal",
     "dagang": "modal",
+    "wedding": "wedding",
+    "nikah": "wedding",
+    "resepsi": "wedding",
+    "akad": "wedding",
+    "walimah": "wedding",
 }
 
 

@@ -56,6 +56,7 @@ CATEGORY_TYPES: dict[str, str] = {
     "[Kakak] Peralatan Kerja": "pengeluaran",
     "[Kakak] Biaya Admin": "pengeluaran",
     "[Kakak] Pajak": "pengeluaran",
+    "[Kakak] Wedding": "pengeluaran",
     "[Kakak] Tabungan": "tabungan",
     # ── Adek & lain ──
     "[Adek] Kebutuhan Adek": "pengeluaran",
