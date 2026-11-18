@@ -214,6 +214,23 @@ Bot   → ✅ tersimpan + saldo terkini
 | `/hari_ini` | Ringkasan transaksi hari ini |
 | `/batal` | Batalkan input yang sedang berjalan |
 
+## Health-check dan Monitoring
+
+`healthcheck.py` melakukan pemeriksaan read-only ke Telegram dan Google Sheets.
+Output hanya berisi status, latency, dan tipe error; token tidak dicetak.
+
+```bash
+python healthcheck.py
+```
+
+Operasi Google Sheets yang gagal sementara akan dicoba ulang dengan exponential
+backoff. Log penting yang dapat dipantau:
+
+- `sheets_retry` — operasi Sheets sedang dicoba ulang
+- `sheets_operation_failed` — retry sudah habis atau error bukan transient
+- `telegram_reply_retry` — pengiriman balasan Telegram sedang dicoba ulang
+- `transaction_save_failed` / `transfer_save_failed` — penyimpanan belum terkonfirmasi
+
 ---
 
 ## Struktur File
@@ -223,6 +240,7 @@ fintrack-bot/
 ├── bot.py              ← main bot & telegram handler
 ├── matcher.py          ← logika pencocokan kategori (fuzzy + keyword hints)
 ├── sheets.py           ← integrasi Google Sheets
+├── healthcheck.py      ← readiness check Telegram + Google Sheets
 ├── nota.py             ← render gambar nota AbdFood (Pillow)
 ├── assets/             ← font sans-serif (DejaVuSans.ttf / DejaVuSans-Bold.ttf)
 ├── config.py           ← kategori, akun, konstanta, prefix map

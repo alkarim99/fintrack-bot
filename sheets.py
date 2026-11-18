@@ -1,9 +1,15 @@
 import asyncio
 import functools
+import logging
 import os
+import random
 import re
 import time
+from typing import Callable, TypeVar
+
 import gspread
+import requests
+from google.auth.exceptions import TransportError
 from google.oauth2.service_account import Credentials
 from config import (
     TRANSACTION_SHEET_NAME,
@@ -11,6 +17,83 @@ from config import (
     today_str,
     get_dashboard_sheet_name,
 )
+
+
+logger = logging.getLogger(__name__)
+T = TypeVar("T")
+
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_DEFAULT_MAX_ATTEMPTS = 4
+_DEFAULT_BACKOFF_SECONDS = 1.0
+_DEFAULT_BACKOFF_MAX_SECONDS = 8.0
+
+
+def _retry_setting(name: str, default: int | float) -> int | float:
+    try:
+        return type(default)(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _is_retryable(exc: Exception) -> bool:
+    status = _status_code(exc)
+    if status in _RETRYABLE_STATUS_CODES:
+        return True
+    return isinstance(
+        exc,
+        (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            TransportError,
+            TimeoutError,
+        ),
+    )
+
+
+def _with_retry(operation: str, fn: Callable[[], T]) -> T:
+    """Run a Google Sheets operation with bounded retry/backoff for transient errors."""
+    max_attempts = max(1, int(_retry_setting("FINTRACK_SHEETS_MAX_ATTEMPTS", _DEFAULT_MAX_ATTEMPTS)))
+    backoff = float(_retry_setting("FINTRACK_SHEETS_BACKOFF_SECONDS", _DEFAULT_BACKOFF_SECONDS))
+    backoff_max = float(
+        _retry_setting("FINTRACK_SHEETS_BACKOFF_MAX_SECONDS", _DEFAULT_BACKOFF_MAX_SECONDS)
+    )
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if not _is_retryable(exc) or attempt >= max_attempts:
+                logger.error(
+                    "sheets_operation_failed operation=%s attempt=%d error_type=%s status=%s",
+                    operation,
+                    attempt,
+                    type(exc).__name__,
+                    _status_code(exc),
+                )
+                raise
+
+            delay = min(backoff_max, backoff * (2 ** (attempt - 1)))
+            delay += random.uniform(0, min(0.25, delay / 4))
+            logger.warning(
+                "sheets_retry operation=%s attempt=%d/%d error_type=%s status=%s retry_in=%.2fs",
+                operation,
+                attempt,
+                max_attempts,
+                type(exc).__name__,
+                _status_code(exc),
+                delay,
+            )
+            time.sleep(delay)
+
+    raise AssertionError("unreachable")
 
 
 def _to_async(fn):
@@ -96,8 +179,14 @@ def _get_sheet(sheet_name: str):
     global _spreadsheet
     client = _get_client()
     if _spreadsheet is None:
-        _spreadsheet = client.open_by_key(os.environ["SPREADSHEET_ID"])
-    return _spreadsheet.worksheet(sheet_name)
+        _spreadsheet = _with_retry(
+            "open_spreadsheet",
+            lambda: client.open_by_key(os.environ["SPREADSHEET_ID"]),
+        )
+    return _with_retry(
+        f"open_worksheet:{sheet_name}",
+        lambda: _spreadsheet.worksheet(sheet_name),
+    )
 
 
 def _parse_rupiah(value: str) -> float:
@@ -127,7 +216,7 @@ def get_master_categories() -> dict[str, str] | None:
     """
     try:
         sheet = _get_sheet(MASTER_SHEET_NAME)
-        rows = sheet.get_values()
+        rows = _with_retry("read_master_categories", sheet.get_values)
         if not rows:
             return None
         header = [h.strip().lower() for h in rows[0]]
@@ -159,7 +248,7 @@ def get_master_categories() -> dict[str, str] | None:
 
 def get_last_saldo() -> float:
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
-    all_values = sheet.col_values(7)
+    all_values = _with_retry("read_last_saldo", lambda: sheet.col_values(7))
     for val in reversed(all_values):
         val_clean = val.strip()
         if val_clean and val_clean.lower() != "saldo":
@@ -174,7 +263,7 @@ def _find_first_empty_row(sheet) -> int:
     global _last_row
     if _last_row is not None:
         return _last_row
-    col_a = sheet.col_values(1)
+    col_a = _with_retry("find_first_empty_row", lambda: sheet.col_values(1))
     for i, val in enumerate(col_a, start=1):
         if i == 1:
             continue
@@ -185,36 +274,65 @@ def _find_first_empty_row(sheet) -> int:
     return _last_row
 
 
-def _write_row(sheet, tanggal, deskripsi, kategori, akun, debit, kredit, keterangan=""):
-    """
-    Tulis satu baris transaksi ke baris kosong pertama.
-    Returns: (target_row, new_saldo)
+def _write_rows(sheet, rows: list[tuple[str, str, str, str, float, float, str]]):
+    """Write one or more rows atomically and return ``(first_row, new_saldo)``.
+
+    The row numbers are resolved once and reused for every retry. This matters when
+    Google returns a transient 503 after accepting a write: retrying the same ranges
+    is safe, while searching for a new empty row could create a duplicate.
     """
     global _last_row
     target_row = _find_first_empty_row(sheet)
-    prev_row = target_row - 1
 
-    row_data = [
-        tanggal,
-        deskripsi,
-        kategori,
-        akun,
-        debit if debit != 0 else "",
-        kredit if kredit != 0 else "",
-    ]
+    updates = []
+    for offset, (tanggal, deskripsi, kategori, akun, debit, kredit, keterangan) in enumerate(rows):
+        row_number = target_row + offset
+        prev_row = row_number - 1
+        row_data = [
+            tanggal,
+            deskripsi,
+            kategori,
+            akun,
+            debit if debit != 0 else "",
+            kredit if kredit != 0 else "",
+        ]
+        updates.extend([
+            {"range": f"A{row_number}:F{row_number}", "values": [row_data]},
+            {"range": f"H{row_number}", "values": [[keterangan]]},
+            {"range": f"G{row_number}", "values": [[f"=G{prev_row}+E{row_number}-F{row_number}"]]},
+        ])
 
-    # Batch update: gabung 3 API call jadi 1
-    sheet.batch_update([
-        {"range": f"A{target_row}:F{target_row}", "values": [row_data]},
-        {"range": f"H{target_row}", "values": [[keterangan]]},
-        {"range": f"G{target_row}", "values": [[f"=G{prev_row}+E{target_row}-F{target_row}"]]},
-    ], value_input_option="USER_ENTERED")
+    # Satu batch untuk transaksi biasa maupun transfer dua baris.
+    _with_retry(
+        "write_transaction_rows",
+        lambda: sheet.batch_update(updates, value_input_option="USER_ENTERED"),
+    )
 
-    # Baca saldo hasil formula
-    saldo_raw = sheet.cell(target_row, 7).value
-    _last_row = target_row + 1
+    last_row = target_row + len(rows) - 1
+    try:
+        saldo_raw = _with_retry(
+            "read_transaction_balance",
+            lambda: sheet.cell(last_row, 7).value,
+        )
+        new_saldo = _parse_rupiah(saldo_raw or "0")
+    except Exception as exc:
+        # The write already succeeded. Do not make the caller repeat the write just
+        # because the non-critical balance read failed afterwards.
+        logger.warning(
+            "sheet_write_succeeded_balance_read_failed error_type=%s status=%s",
+            type(exc).__name__,
+            _status_code(exc),
+        )
+        new_saldo = None
+
+    _last_row = last_row + 1
     _cache_clear()  # invalidasi semua cache karena data sudah berubah
-    return target_row, _parse_rupiah(saldo_raw or "0")
+    return target_row, new_saldo
+
+
+def _write_row(sheet, tanggal, deskripsi, kategori, akun, debit, kredit, keterangan=""):
+    """Tulis satu baris transaksi dengan retry yang aman pada baris yang sama."""
+    return _write_rows(sheet, [(tanggal, deskripsi, kategori, akun, debit, kredit, keterangan)])
 
 
 @_to_async
@@ -226,8 +344,8 @@ def append_transaction(
     debit: float,
     kredit: float,
     keterangan: str = "",
-) -> float:
-    """Tambah satu baris transaksi. Returns saldo baru."""
+) -> float | None:
+    """Tambah satu baris transaksi. Returns saldo baru bila pembacaan saldo sukses."""
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
     _, new_saldo = _write_row(sheet, tanggal, deskripsi, kategori, akun, debit, kredit, keterangan)
     return new_saldo
@@ -240,13 +358,13 @@ def append_transfer(
     akun_tujuan: str,
     nominal: float,
     kode_unik: float = 0.0,
-) -> float:
+) -> float | None:
     """
     Catat transfer internal sebagai 2 baris:
     1. Kredit di akun asal (nominal + kode_unik jika ada)
     2. Debit di akun tujuan (nominal bersih)
     Deskripsi otomatis, kecuali tarik tunai (tujuan = Cash).
-    Returns: saldo total setelah kedua baris.
+    Returns: saldo total setelah kedua baris, atau None bila hanya pembacaan saldo yang gagal.
     """
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
     kategori = "[Transfer] Internal"
@@ -264,11 +382,11 @@ def append_transfer(
 
     total_keluar = nominal + kode_unik
 
-    # Baris 1: kredit dari akun asal (termasuk kode unik)
-    _write_row(sheet, tanggal, deskripsi_asal, kategori, akun_asal, 0, total_keluar)
-
-    # Baris 2: debit ke akun tujuan (nominal bersih)
-    _, new_saldo = _write_row(sheet, tanggal, deskripsi_tujuan, kategori, akun_tujuan, nominal, 0)
+    # Dua baris ditulis dalam satu batch agar transfer tidak bisa tersimpan separuh.
+    _, new_saldo = _write_rows(sheet, [
+        (tanggal, deskripsi_asal, kategori, akun_asal, 0, total_keluar, ""),
+        (tanggal, deskripsi_tujuan, kategori, akun_tujuan, nominal, 0, ""),
+    ])
 
     return new_saldo
 
@@ -297,7 +415,7 @@ def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
     mendapatkan n transaksi yang match dengan akun filter.
     """
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
-    col_a = sheet.col_values(1)
+    col_a = _with_retry("read_transaction_dates", lambda: sheet.col_values(1))
 
     # Cari baris data terakhir
     last_row = 1
@@ -318,7 +436,10 @@ def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
 
         while len(result) < n and current_end >= 2:
             current_start = max(2, current_end - batch_size + 1)
-            rows = sheet.get_values(f"A{current_start}:G{current_end}")
+            rows = _with_retry(
+                "read_transaction_history_batch",
+                lambda: sheet.get_values(f"A{current_start}:G{current_end}"),
+            )
 
             # Proses dari bawah (paling baru) ke atas dalam batch ini
             for row in reversed(rows):
@@ -334,7 +455,10 @@ def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
     else:
         # Tanpa filter: ambil n baris terakhir (existing behavior)
         start_row = max(2, last_row - n + 1)
-        rows = sheet.get_values(f"A{start_row}:G{last_row}")
+        rows = _with_retry(
+            "read_transaction_history",
+            lambda: sheet.get_values(f"A{start_row}:G{last_row}"),
+        )
 
         result = []
         for row in rows:
@@ -350,7 +474,7 @@ def get_riwayat(n: int = 10, akun_list: list[str] | None = None) -> list[dict]:
 def get_all_transactions() -> list[dict]:
     """Ambil seluruh baris transaksi (parsed) dari Transaction Log dalam satu batch."""
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
-    col_a = sheet.col_values(1)
+    col_a = _with_retry("read_all_transaction_dates", lambda: sheet.col_values(1))
     last_row = 1
     for i, val in enumerate(col_a, start=1):
         if i == 1:
@@ -359,7 +483,10 @@ def get_all_transactions() -> list[dict]:
             last_row = i
     if last_row < 2:
         return []
-    rows = sheet.get_values(f"A2:G{last_row}")
+    rows = _with_retry(
+        "read_all_transactions",
+        lambda: sheet.get_values(f"A2:G{last_row}"),
+    )
     result = []
     for row in rows:
         parsed = _parse_row(row)
@@ -373,7 +500,7 @@ def get_all_transactions() -> list[dict]:
 def get_transaksi_hari_ini(tanggal: str) -> list[dict]:
     """Ambil semua transaksi di tanggal tertentu."""
     sheet = _get_sheet(TRANSACTION_SHEET_NAME)
-    rows = sheet.get_all_records()
+    rows = _with_retry("read_today_transactions", sheet.get_all_records)
     return [
         r for r in rows
         if str(r.get("Tanggal", "")).strip() == tanggal
@@ -390,7 +517,10 @@ def get_kas_rt_buku() -> float | None:
     """
     try:
         sheet = _get_sheet(get_dashboard_sheet_name())
-        val = sheet.cell(19, 13).value  # M19 (kolom M = 13, baris 19)
+        val = _with_retry(
+            "read_kas_rt_balance",
+            lambda: sheet.cell(19, 13).value,
+        )  # M19 (kolom M = 13, baris 19)
         if val is None or str(val).strip() == "":
             return None
         return _parse_rupiah(val)
@@ -408,7 +538,10 @@ def get_hutang_from_dashboard() -> tuple[float | None, list[tuple[str, float]]]:
     """
     try:
         sheet = _get_sheet(get_dashboard_sheet_name())
-        rows = sheet.get_values("H23:M28")
+        rows = _with_retry(
+            "read_debt_dashboard",
+            lambda: sheet.get_values("H23:M28"),
+        )
     except Exception:
         return None, []
     if not rows:
@@ -437,7 +570,10 @@ def get_saldo_dari_dashboard() -> tuple[dict[str, float], float, float]:
     """Kembalikan (saldo_per_akun, total_tanpa_blu, total_dengan_blu)."""
     sheet_name = get_dashboard_sheet_name()
     sheet = _get_sheet(sheet_name)
-    rows = sheet.get_values("H4:L25")
+    rows = _with_retry(
+        "read_balance_dashboard",
+        lambda: sheet.get_values("H4:L25"),
+    )
     saldo = {}
     for row in rows:
         if not row or not row[0].strip():
@@ -449,8 +585,12 @@ def get_saldo_dari_dashboard() -> tuple[dict[str, float], float, float]:
         saldo[nama_akun] = saldo_ini
 
     # Baca total langsung dari cell (L15 dan L21)
-    total_tanpa_blu = _parse_rupiah(sheet.cell(15, 12).value)
-    total_dengan_blu = _parse_rupiah(sheet.cell(21, 12).value)
+    total_tanpa_blu = _parse_rupiah(
+        _with_retry("read_balance_total_without_blu", lambda: sheet.cell(15, 12).value)
+    )
+    total_dengan_blu = _parse_rupiah(
+        _with_retry("read_balance_total_with_blu", lambda: sheet.cell(21, 12).value)
+    )
     return saldo, total_tanpa_blu, total_dengan_blu
 
 

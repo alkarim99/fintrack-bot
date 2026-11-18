@@ -2,9 +2,10 @@
 Fintrack Bot — Telegram bot untuk pencatatan keuangan ke Google Sheets.
 """
 
+import asyncio
+import logging
 import os
 import re
-import logging
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,6 +18,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.error import NetworkError, RetryAfter, TimedOut
 import config
 from config import today_str, resolve_forced_category, category_type, get_dashboard_sheet_name, WIB
 from matcher import match_category, best_match, match_account, format_category_choices, resolve_prefix
@@ -35,14 +37,79 @@ from sheets import (
 )
 from nota import render_nota_image
 
+_TOKEN_PATTERN = re.compile(r"(bot\d+:[A-Za-z0-9_-]+)")
+
+
+class _SecretRedactionFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = _TOKEN_PATTERN.sub(r"\1<redacted>", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_SecretRedactionFilter())
+
+# HTTPX logs include complete Telegram URLs, including the bot token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # { chat_id: { "stage": str, "data": dict } }
 user_state: dict[int, dict] = {}
+
+
+async def reply_text(update: Update, text: str, **kwargs):
+    """Reply with bounded retries for transient Telegram network failures."""
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await update.message.reply_text(text, **kwargs)
+        except RetryAfter as exc:
+            if attempt >= max_attempts:
+                raise
+            delay = min(float(exc.retry_after), 10.0)
+        except (NetworkError, TimedOut) as exc:
+            if attempt >= max_attempts:
+                raise
+            delay = min(2 ** (attempt - 1), 8)
+            logger.warning(
+                "telegram_reply_retry attempt=%d/%d error_type=%s retry_in=%.1fs",
+                attempt,
+                max_attempts,
+                type(exc).__name__,
+                delay,
+            )
+        await asyncio.sleep(delay)
+
+
+async def best_effort_reply(update: Update, text: str, **kwargs):
+    """Send a progress message without aborting the underlying operation."""
+    try:
+        return await reply_text(update, text, **kwargs)
+    except (NetworkError, RetryAfter, TimedOut) as exc:
+        logger.error(
+            "telegram_reply_failed error_type=%s",
+            type(exc).__name__,
+        )
+        return None
+
+
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Record unhandled update failures without leaking request secrets."""
+    error = context.error
+    logger.error(
+        "unhandled_update_error update_id=%s error_type=%s",
+        getattr(update, "update_id", None),
+        type(error).__name__ if error else "UnknownError",
+    )
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -325,7 +392,7 @@ def build_transfer_preview(data: dict) -> str:
 # ─── Command Handlers ─────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await reply_text(update,
         "👋 Halo! Saya *Fintrack Bot*.\n\n"
         "Gunakan /help untuk melihat semua perintah yang tersedia.",
         parse_mode="Markdown",
@@ -333,7 +400,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await reply_text(update,
         "📖 *Daftar Perintah Fintrack Bot*\n\n"
         "💳 *Transaksi*\n"
         "  /format — Template input transaksi\n"
@@ -358,7 +425,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Mengambil data saldo...")
+    await reply_text(update, "⏳ Mengambil data saldo...")
     try:
         saldo, total_tanpa_blu, total_dengan_blu = await get_saldo_dari_dashboard()
 
@@ -378,7 +445,7 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     not_found.append(a)
 
             if not_found:
-                await update.message.reply_text(
+                await reply_text(update,
                     f"⚠️ Akun tidak dikenali: {', '.join(not_found)}"
                 )
                 if not akun_list:
@@ -389,14 +456,14 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rekap = format_saldo_rekap(saldo)
         else:
             rekap = format_saldo_rekap(saldo, total_tanpa_blu, total_dengan_blu)
-        await update.message.reply_text(rekap, parse_mode="Markdown")
+        await reply_text(update, rekap, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error get saldo: {e}")
-        await update.message.reply_text(f"❌ Gagal ambil saldo: {e}")
+        await reply_text(update, f"❌ Gagal ambil saldo: {e}")
 
 
 async def cmd_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await reply_text(update,
         "📋 *Template Transaksi*\n\n"
         "Salin, isi, lalu kirim:\n"
         "```\n"
@@ -433,7 +500,7 @@ async def cmd_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await reply_text(update,
         "📋 *Template Transfer Internal*\n\n"
         "Salin, isi, lalu kirim:\n"
         "```\n"
@@ -472,7 +539,7 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_nota(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await reply_text(update,
         "🧾 *Template Nota AbdFood*\n\n"
         "Salin, isi, lalu kirim:\n"
         "```\n"
@@ -500,7 +567,7 @@ async def cmd_nota(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Mengambil riwayat transaksi...")
+    await reply_text(update, "⏳ Mengambil riwayat transaksi...")
     try:
         # Filter by account jika ada argumen (contoh: /riwayat BCA)
         akun_list = None
@@ -519,7 +586,7 @@ async def cmd_riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     not_found.append(a)
 
             if not_found:
-                await update.message.reply_text(
+                await reply_text(update,
                     f"⚠️ Akun tidak dikenali: {', '.join(not_found)}"
                 )
                 if not akun_list:
@@ -528,7 +595,7 @@ async def cmd_riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = await get_riwayat(n=10, akun_list=akun_list)
         if not rows:
             filter_info = f" untuk akun {', '.join(akun_list)}" if akun_list else ""
-            await update.message.reply_text(f"Belum ada transaksi{filter_info}.")
+            await reply_text(update, f"Belum ada transaksi{filter_info}.")
             return
 
         header = f"📜 *10 Transaksi Terakhir{' (' + ', '.join(akun_list) + ')' if akun_list else ''}*\n"
@@ -542,19 +609,19 @@ async def cmd_riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"   {r['kategori']} | {r['akun']}\n"
                 f"   Rp{nominal:,.2f}\n"
             )
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await reply_text(update, "\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error riwayat: {e}")
-        await update.message.reply_text(f"❌ Gagal ambil riwayat: {e}")
+        await reply_text(update, f"❌ Gagal ambil riwayat: {e}")
 
 
 async def cmd_hari_ini(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Mengambil transaksi hari ini...")
+    await reply_text(update, "⏳ Mengambil transaksi hari ini...")
     try:
         tanggal = today_str()
         rows = await get_transaksi_hari_ini(tanggal)
         if not rows:
-            await update.message.reply_text(f"Belum ada transaksi hari ini ({tanggal}).")
+            await reply_text(update, f"Belum ada transaksi hari ini ({tanggal}).")
             return
 
         def _num(v):
@@ -594,10 +661,10 @@ async def cmd_hari_ini(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if n_neraca:
             footer += f"\n⏸️ {n_neraca} transaksi pos-neraca (transfer/kas RT/hutang/titipan) tidak dihitung"
         lines.append(footer)
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await reply_text(update, "\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error hari_ini: {e}")
-        await update.message.reply_text(f"❌ Gagal ambil data hari ini: {e}")
+        await reply_text(update, f"❌ Gagal ambil data hari ini: {e}")
 
 
 def _fmt_items(items: list[dict], limit: int = 10) -> list[str]:
@@ -612,7 +679,7 @@ def _fmt_items(items: list[dict], limit: int = 10) -> list[str]:
 
 
 async def cmd_hutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Mengambil posisi hutang...")
+    await reply_text(update, "⏳ Mengambil posisi hutang...")
     try:
         total, rincian = await get_hutang_from_dashboard()
         dash = get_dashboard_sheet_name()
@@ -632,14 +699,14 @@ async def cmd_hutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for pemberi, sisa in rincian_aktif:
                 lines.append(f"  • {pemberi}: Rp{sisa:,.0f}")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await reply_text(update, "\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error hutang: {e}")
-        await update.message.reply_text(f"❌ Gagal ambil hutang: {e}")
+        await reply_text(update, f"❌ Gagal ambil hutang: {e}")
 
 
 async def cmd_piutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Menghitung posisi piutang...")
+    await reply_text(update, "⏳ Menghitung posisi piutang...")
     try:
         txns = await get_all_transactions()
         items = [t for t in txns if t["kategori"].startswith("[Piutang]")]
@@ -656,14 +723,14 @@ async def cmd_piutang(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines += _fmt_items(items)
         else:
             lines.append("\n_Belum ada transaksi berkategori [Piutang]._")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await reply_text(update, "\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error piutang: {e}")
-        await update.message.reply_text(f"❌ Gagal hitung piutang: {e}")
+        await reply_text(update, f"❌ Gagal hitung piutang: {e}")
 
 
 async def cmd_kasrt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Merekonsiliasi kas RT...")
+    await reply_text(update, "⏳ Merekonsiliasi kas RT...")
     try:
         txns = await get_all_transactions()
         masuk = sum(t["debit"] for t in txns if t["kategori"].startswith("[Kas RT]"))
@@ -710,10 +777,10 @@ async def cmd_kasrt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 lines.append(f"🟢 *LEBIH: Rp{-lubang:,.2f}*")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await reply_text(update, "\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error kasrt: {e}")
-        await update.message.reply_text(f"❌ Gagal rekonsiliasi kas RT: {e}")
+        await reply_text(update, f"❌ Gagal rekonsiliasi kas RT: {e}")
 
 
 def _bar(frac: float, width: int = 10) -> str:
@@ -723,7 +790,7 @@ def _bar(frac: float, width: int = 10) -> str:
 
 
 async def cmd_anggaran(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Menghitung realisasi anggaran...")
+    await reply_text(update, "⏳ Menghitung realisasi anggaran...")
     try:
         import calendar
         from datetime import datetime
@@ -772,21 +839,21 @@ async def cmd_anggaran(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         lines.append(f"\n💡 Laju ideal ~{pace*100:.0f}% terpakai. 🔸=di atas laju, ⚠️=lewat target.")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await reply_text(update, "\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error anggaran: {e}")
-        await update.message.reply_text(f"❌ Gagal hitung anggaran: {e}")
+        await reply_text(update, f"❌ Gagal hitung anggaran: {e}")
 
 
 async def cmd_batal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_state.pop(chat_id, None)
-    await update.message.reply_text("❌ Transaksi dibatalkan.")
+    await reply_text(update, "❌ Transaksi dibatalkan.")
 
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     refresh_cache()
-    await update.message.reply_text("✅ Cache di-refresh. Data akan dibaca ulang dari spreadsheet.")
+    await reply_text(update, "✅ Cache di-refresh. Data akan dibaca ulang dari spreadsheet.")
 
 
 # ─── Message Handler ──────────────────────────────────────────────────────────
@@ -804,7 +871,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if text.lower() == "batal":
             user_state.pop(chat_id, None)
-            await update.message.reply_text("❌ Transaksi dibatalkan.")
+            await reply_text(update, "❌ Transaksi dibatalkan.")
             return
 
         try:
@@ -812,14 +879,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if 0 <= idx < len(choices):
                 data["kategori"] = choices[idx]["kategori"]
                 user_state[chat_id] = {"stage": "awaiting_confirm", "data": data}
-                await update.message.reply_text(build_preview(data), parse_mode="Markdown")
+                await reply_text(update, build_preview(data), parse_mode="Markdown")
             else:
-                await update.message.reply_text(
+                await reply_text(update,
                     f"Pilih angka 1–{len(choices)}, atau ketik *batal*.",
                     parse_mode="Markdown",
                 )
         except ValueError:
-            await update.message.reply_text(
+            await reply_text(update,
                 f"Ketik angka 1–{len(choices)} untuk memilih kategori, atau *batal*.",
                 parse_mode="Markdown",
             )
@@ -830,6 +897,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = state["data"]
 
         if text.lower() == "ok":
+            await best_effort_reply(update, "⏳ Menyimpan transaksi ke Google Sheets...")
             try:
                 debit = data["nominal_float"] if data["jenis"] == "masuk" else 0.0
                 kredit = data["nominal_float"] if data["jenis"] == "keluar" else 0.0
@@ -842,21 +910,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     kredit=kredit,
                 )
                 user_state.pop(chat_id, None)
-                await update.message.reply_text(
+                saldo_message = (
+                    f"💰 Saldo total terkini: *Rp{new_saldo:,.2f}*"
+                    if new_saldo is not None
+                    else "💰 Transaksi tersimpan; saldo akan dibaca ulang saat /saldo."
+                )
+                await reply_text(update,
                     f"✅ *Tersimpan!*\n\n"
-                    f"💰 Saldo total terkini: *Rp{new_saldo:,.2f}*\n\n"
+                    f"{saldo_message}\n\n"
                     f"Ketik /saldo untuk rekap lengkap per akun.",
                     parse_mode="Markdown",
                 )
             except Exception as e:
-                logger.error(f"Error simpan transaksi: {e}")
-                await update.message.reply_text(f"❌ Gagal menyimpan: {e}")
+                logger.error(
+                    "transaction_save_failed error_type=%s",
+                    type(e).__name__,
+                    exc_info=True,
+                )
+                await reply_text(
+                    update,
+                    "❌ Penyimpanan belum terkonfirmasi. Cek /riwayat atau /saldo "
+                    "sebelum mengirim *ok* lagi.",
+                    parse_mode="Markdown",
+                )
 
         elif text.lower() == "batal":
             user_state.pop(chat_id, None)
-            await update.message.reply_text("❌ Transaksi dibatalkan.")
+            await reply_text(update, "❌ Transaksi dibatalkan.")
         else:
-            await update.message.reply_text(
+            await reply_text(update,
                 "Balas *ok* untuk simpan atau *batal* untuk membatalkan.",
                 parse_mode="Markdown",
             )
@@ -867,6 +949,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = state["data"]
 
         if text.lower() == "ok":
+            await best_effort_reply(update, "⏳ Menyimpan transfer ke Google Sheets...")
             try:
                 new_saldo = await append_transfer(
                     tanggal=data["tanggal"],
@@ -876,21 +959,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     kode_unik=data.get("kode_unik_float", 0.0),
                 )
                 user_state.pop(chat_id, None)
-                await update.message.reply_text(
+                saldo_message = (
+                    f"💰 Saldo total terkini: *Rp{new_saldo:,.2f}*"
+                    if new_saldo is not None
+                    else "💰 Transfer tersimpan; saldo akan dibaca ulang saat /saldo."
+                )
+                await reply_text(update,
                     f"✅ *Transfer tersimpan!*\n\n"
-                    f"💰 Saldo total terkini: *Rp{new_saldo:,.2f}*\n\n"
+                    f"{saldo_message}\n\n"
                     f"Ketik /saldo untuk rekap lengkap per akun.",
                     parse_mode="Markdown",
                 )
             except Exception as e:
-                logger.error(f"Error simpan transfer: {e}")
-                await update.message.reply_text(f"❌ Gagal menyimpan: {e}")
+                logger.error(
+                    "transfer_save_failed error_type=%s",
+                    type(e).__name__,
+                    exc_info=True,
+                )
+                await reply_text(
+                    update,
+                    "❌ Transfer belum terkonfirmasi. Cek /riwayat atau /saldo "
+                    "sebelum mengirim *ok* lagi.",
+                    parse_mode="Markdown",
+                )
 
         elif text.lower() == "batal":
             user_state.pop(chat_id, None)
-            await update.message.reply_text("❌ Transfer dibatalkan.")
+            await reply_text(update, "❌ Transfer dibatalkan.")
         else:
-            await update.message.reply_text(
+            await reply_text(update,
                 "Balas *ok* untuk simpan atau *batal* untuk membatalkan.",
                 parse_mode="Markdown",
             )
@@ -913,37 +1010,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if jenis_raw == "transfer":
         transfer = parse_transfer_message(text)
         if isinstance(transfer, str):
-            await update.message.reply_text(f"⚠️ {transfer}", parse_mode="Markdown")
+            await reply_text(update, f"⚠️ {transfer}", parse_mode="Markdown")
             return
 
         akun_asal = match_account(transfer["dari"])
         akun_tujuan = match_account(transfer["ke"])
 
         if akun_asal is None:
-            await update.message.reply_text(
+            await reply_text(update,
                 f"⚠️ Akun asal *{transfer['dari']}* tidak dikenali.", parse_mode="Markdown"
             )
             return
         if akun_tujuan is None:
-            await update.message.reply_text(
+            await reply_text(update,
                 f"⚠️ Akun tujuan *{transfer['ke']}* tidak dikenali.", parse_mode="Markdown"
             )
             return
         if akun_asal == akun_tujuan:
-            await update.message.reply_text("⚠️ Akun asal dan tujuan tidak boleh sama.")
+            await reply_text(update, "⚠️ Akun asal dan tujuan tidak boleh sama.")
             return
 
         transfer["dari"] = akun_asal
         transfer["ke"] = akun_tujuan
         user_state[chat_id] = {"stage": "awaiting_transfer_confirm", "data": transfer}
-        await update.message.reply_text(build_transfer_preview(transfer), parse_mode="Markdown")
+        await reply_text(update, build_transfer_preview(transfer), parse_mode="Markdown")
         return
 
     # Routing: nota gambar (standalone, tidak dicatat ke spreadsheet)
     if jenis_raw == "nota":
         nota = parse_nota_message(text)
         if isinstance(nota, str):
-            await update.message.reply_text(
+            await reply_text(update,
                 f"⚠️ {nota}\n\nGunakan /nota untuk melihat template.",
                 parse_mode="Markdown",
             )
@@ -958,7 +1055,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"Error render nota: {e}")
-            await update.message.reply_text(f"❌ Gagal render nota: {e}")
+            await reply_text(update, f"❌ Gagal render nota: {e}")
             return
         await update.message.reply_photo(
             photo=png,
@@ -972,7 +1069,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parsed = parse_transaction_message(text)
 
     if isinstance(parsed, str):
-        await update.message.reply_text(
+        await reply_text(update,
             f"⚠️ Format tidak valid: {parsed}\n\n"
             "Gunakan /format untuk melihat template.",
             parse_mode="Markdown",
@@ -981,7 +1078,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     akun_valid = match_account(parsed["akun"])
     if akun_valid is None:
-        await update.message.reply_text(
+        await reply_text(update,
             f"⚠️ Akun *{parsed['akun']}* tidak dikenali.\n"
             "Gunakan /saldo untuk melihat daftar akun yang tersedia.",
             parse_mode="Markdown",
@@ -996,19 +1093,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if forced:
         parsed["kategori"] = forced
         user_state[chat_id] = {"stage": "awaiting_confirm", "data": parsed}
-        await update.message.reply_text(build_preview(parsed), parse_mode="Markdown")
+        await reply_text(update, build_preview(parsed), parse_mode="Markdown")
         return
 
     kategori = best_match(parsed["prefix"], parsed["deskripsi"], threshold=0.8)
     if kategori:
         parsed["kategori"] = kategori
         user_state[chat_id] = {"stage": "awaiting_confirm", "data": parsed}
-        await update.message.reply_text(build_preview(parsed), parse_mode="Markdown")
+        await reply_text(update, build_preview(parsed), parse_mode="Markdown")
     else:
         choices = match_category(parsed["prefix"], parsed["deskripsi"], top_n=3)
         choices_text = format_category_choices(choices)
         user_state[chat_id] = {"stage": "awaiting_category", "data": parsed, "choices": choices}
-        await update.message.reply_text(
+        await reply_text(update,
             f"🤔 Kategori tidak ditemukan secara otomatis.\n"
             f"Pilih yang paling sesuai (ketik angkanya):\n\n"
             f"{choices_text}\n\n"
@@ -1056,6 +1153,7 @@ def main():
     app.add_handler(CommandHandler("batal", cmd_batal))
     app.add_handler(CommandHandler("refresh", cmd_refresh))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(handle_error)
 
     logger.info("Fintrack Bot starting...")
     app.run_polling()
